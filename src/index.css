@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+body {
+  background-color: #000000; /* OLED Black */
+  color: #ffffff;
+}
