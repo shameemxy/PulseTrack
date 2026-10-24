@@ -5,7 +5,7 @@ import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
-import { Play, Wifi, Battery, Clock, X, AlertTriangle, Send, Activity, ShieldAlert, MessageSquare, CheckCircle, Clock3 } from 'lucide-react';
+import { Play, Wifi, Battery, Clock, X, AlertTriangle, Send, Activity, ShieldAlert, MessageSquare, CheckCircle, Clock3, MapPin, Mic } from 'lucide-react';
 
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
@@ -233,11 +233,14 @@ export default function CommandCenter() {
                             
                             <div className={`absolute top-0 left-0 w-1.5 h-full ${isPending ? 'bg-amber-500' : 'bg-red-500'}`}></div>
 
+                            {/* Header: Name, Time, Battery, Network */}
                             <div className="flex justify-between items-start border-b border-slate-100 pb-2 pl-2">
                                 <div>
                                     <h3 className="font-bold text-sm text-slate-800">{user.victimName || user.id}</h3>
-                                    <div className="text-slate-500 text-[10px] flex items-center gap-1 font-mono mt-0.5">
-                                        <Clock size={10}/> {user.timestamp ? new Date(user.timestamp).toLocaleTimeString() : "Time Unknown"}
+                                    <div className="text-slate-500 text-[10px] flex items-center gap-2 font-mono mt-1">
+                                        <span className="flex items-center gap-0.5"><Clock size={10}/> {user.timestamp ? new Date(user.timestamp).toLocaleTimeString() : "Unknown"}</span>
+                                        {user.battery && <span className="flex items-center gap-0.5 text-emerald-600"><Battery size={10}/> {user.battery}%</span>}
+                                        {user.packetType && <span className="flex items-center gap-0.5 text-blue-600"><Wifi size={10}/> {user.packetType === "LOW_BANDWIDTH" ? "2G" : "4G/5G"}</span>}
                                     </div>
                                 </div>
                                 <div>
@@ -252,7 +255,23 @@ export default function CommandCenter() {
                                     )}
                                 </div>
                             </div>
+
+                            {/* Location & Transcript Info */}
+                            <div className="pl-2 flex flex-col gap-1.5 mt-1">
+                                {user.lat && user.lng && (
+                                    <div className="text-[10px] text-slate-500 flex items-center gap-1 font-mono">
+                                        <MapPin size={10} className="text-red-500"/> {user.lat.toFixed(5)}, {user.lng.toFixed(5)}
+                                    </div>
+                                )}
+                                {user.transcript && user.transcript.trim() !== "No words captured." && (
+                                    <div className="text-[10px] text-slate-600 italic bg-slate-100 p-1.5 rounded border border-slate-200 flex gap-1.5">
+                                        <Mic size={12} className="text-blue-500 flex-shrink-0 mt-0.5"/> 
+                                        <span>"{user.transcript}"</span>
+                                    </div>
+                                )}
+                            </div>
                             
+                            {/* Motion & Audio Sensor Blocks */}
                             <div className="grid grid-cols-2 gap-2 pl-2">
                                 <div className="bg-slate-50 p-2 rounded border border-slate-100">
                                     <div className="text-[9px] font-bold text-slate-400 uppercase">Motion</div>
@@ -264,18 +283,28 @@ export default function CommandCenter() {
                                 </div>
                             </div>
 
-                            {user.photoBase64 && (
-                                <div className="cursor-pointer relative w-14 h-14 ml-2 group" onClick={() => setSelectedImage(user.photoBase64)}>
-                                    <img src={user.photoBase64} alt="img" className="w-full h-full object-cover rounded-md border border-slate-200 shadow-xs" />
+                            {/* Multimedia Render: Audio Player & Photo Thumbnail */}
+                            {(user.photoBase64 || user.audioRecordBase64) && (
+                                <div className="pl-2 flex gap-2 items-center mt-1">
+                                    {user.photoBase64 && (
+                                        <div className="cursor-pointer relative w-12 h-12 flex-shrink-0 group rounded-md border border-slate-200 shadow-xs overflow-hidden" onClick={() => setSelectedImage(user.photoBase64)}>
+                                            <img src={user.photoBase64} alt="img" className="w-full h-full object-cover" />
+                                        </div>
+                                    )}
+                                    {user.audioRecordBase64 && (
+                                        <audio controls src={user.audioRecordBase64} className="w-full h-8 flex-1 outline-none" />
+                                    )}
                                 </div>
                             )}
 
-                            <div className="bg-slate-800 p-3 rounded-lg text-white ml-2 shadow-inner">
+                            {/* CCAI Assessment Box */}
+                            <div className="bg-slate-800 p-3 rounded-lg text-white ml-2 shadow-inner mt-1">
                                 <p className="text-xs font-medium leading-relaxed">
                                     {user.aiTriage || "Assessment Pending..."}
                                 </p>
                             </div>
 
+                            {/* Command Verify Button */}
                             {isPending && (
                                 <div className="ml-2 mt-1 pt-1">
                                     <button 
