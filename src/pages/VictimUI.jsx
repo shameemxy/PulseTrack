@@ -18,6 +18,14 @@ export default function VictimUI() {
   const [audioDB, setAudioDB] = useState(0);
   const [motionMS2, setMotionMS2] = useState(0);
   
+  const [motionHistory, setMotionHistory] = useState(Array(25).fill(50));
+  const [audioHistory, setAudioHistory] = useState(Array(25).fill(50));
+  const currentMotionRef = useRef(0);
+  const currentAudioRef = useRef(0);
+  
+  // Ref to track the previous frame's axes for Delta calculation
+  const lastAccRef = useRef({ x: null, y: null, z: null });
+  
   const [motionThreshold, setMotionThreshold] = useState(15);
   const [audioThreshold, setAudioThreshold] = useState(85);
   
@@ -48,6 +56,22 @@ export default function VictimUI() {
   useEffect(() => { motionThreshRef.current = motionThreshold; }, [motionThreshold]);
   useEffect(() => { audioThreshRef.current = audioThreshold; }, [audioThreshold]);
 
+  // Live ECG Waveform Animation Loop
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const mVal = currentMotionRef.current;
+      // Multiply the visual spike so small movements look significant on the graph
+      const motionY = 50 + (mVal > 0.5 ? (Math.random() > 0.5 ? -mVal * 3 : mVal * 3) : (Math.random() * 4 - 2));
+
+      const aVal = currentAudioRef.current;
+      const audioY = 50 + (aVal > 5 ? (Math.random() > 0.5 ? -aVal * 0.5 : aVal * 0.5) : (Math.random() * 3 - 1.5));
+
+      setMotionHistory(prev => [...prev.slice(1), Math.min(Math.max(motionY, 10), 90)]);
+      setAudioHistory(prev => [...prev.slice(1), Math.min(Math.max(audioY, 10), 90)]);
+    }, 80); 
+    return () => clearInterval(interval);
+  }, []);
+
   useEffect(() => {
     if (timeLeft > 0 && !isBlackout && falseAlarmTimer === null) {
       const timer = setInterval(() => setTimeLeft(prev => prev - 1), 1000);
@@ -74,15 +98,42 @@ export default function VictimUI() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
+  // THE FIX: Delta-Based Motion Handling
   const handleMotion = (event) => {
-    if (event.accelerationIncludingGravity && !isTrappedRef.current) {
-      const { x, y, z } = event.accelerationIncludingGravity;
-      const movement = Math.abs(Math.sqrt(x*x + y*y + z*z) - 9.8); 
-      setMotionMS2(movement);
-      
-      if (movement > motionThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current) {
-        triggerFalseAlarm();
-      }
+    if (isTrappedRef.current) return;
+
+    // Grab whatever acceleration data the device allows
+    const acc = event.acceleration || event.accelerationIncludingGravity;
+    if (!acc || acc.x === null) return;
+
+    const { x, y, z } = acc;
+
+    // If this is the first frame, save it and skip math
+    if (lastAccRef.current.x === null) {
+        lastAccRef.current = { x, y, z };
+        return;
+    }
+
+    // Calculate the exact difference (Delta) between this frame and the last frame
+    const deltaX = Math.abs(x - lastAccRef.current.x);
+    const deltaY = Math.abs(y - lastAccRef.current.y);
+    const deltaZ = Math.abs(z - lastAccRef.current.z);
+
+    // Sum the deltas to get pure movement intensity (ignoring static gravity)
+    let movement = deltaX + deltaY + deltaZ;
+
+    // Update the ref for the next frame
+    lastAccRef.current = { x, y, z };
+
+    // Noise gate: ignore tiny micro-vibrations
+    if (movement < 0.5) movement = 0;
+
+    currentMotionRef.current = movement;
+    setMotionMS2(movement);
+    
+    // Trigger alarm if shaking exceeds threshold
+    if (movement > motionThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current) {
+      triggerFalseAlarm();
     }
   };
 
@@ -131,6 +182,8 @@ export default function VictimUI() {
         analyser.getByteFrequencyData(dataArray);
         const avg = dataArray.reduce((a, b) => a + b) / dataArray.length;
         const currentDB = Math.max(0, (avg / 255) * 120);
+        
+        currentAudioRef.current = currentDB;
         setAudioDB(currentDB);
         
         if (currentDB > audioThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current) {
@@ -178,15 +231,6 @@ export default function VictimUI() {
     try { recognitionRef.current?.stop(); } catch(e) {}
   };
 
-  useEffect(() => {
-    if (falseAlarmTimer !== null && falseAlarmTimer > 0) {
-      const timer = setInterval(() => setFalseAlarmTimer(prev => prev - 1), 1000);
-      return () => clearInterval(timer);
-    } else if (falseAlarmTimer === 0) {
-        handleTrapped(true);
-    }
-  }, [falseAlarmTimer]);
-
   const getProcessedAudio = async () => {
     return new Promise((resolve) => {
       const safetyTimer = setTimeout(() => resolve(""), 1500);
@@ -222,8 +266,6 @@ export default function VictimUI() {
       try {
         if (videoRef.current.readyState >= 2) {
           const canvas = document.createElement("canvas");
-          const vw = videoRef.current.videoWidth;
-          const vh = videoRef.current.videoHeight;
           canvas.width = 480; 
           canvas.height = 640;
           canvas.getContext('2d').drawImage(videoRef.current, 0, 0, 480, 640);
@@ -272,7 +314,6 @@ export default function VictimUI() {
     }
   };
 
-  // 1. SURVIVAL MODE UI (Clean & Stark)
   if (isBlackout) return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-6 text-center">
         <ShieldAlert size={64} className="text-red-600 mb-4" />
@@ -281,7 +322,6 @@ export default function VictimUI() {
     </div>
   );
 
-  // 2. FALSE ALARM TRIGGER UI (High Contrast)
   if (falseAlarmTimer !== null) return (
     <div className="min-h-screen bg-red-600 flex flex-col justify-center items-center p-6 text-center text-white z-50 fixed inset-0">
         <ShieldAlert size={80} className="text-white animate-pulse mb-6" />
@@ -294,12 +334,10 @@ export default function VictimUI() {
     </div>
   );
 
-  // 3. MAIN ENTERPRISE UI
   return (
     <div className="min-h-screen bg-slate-50 p-6 flex flex-col font-sans text-slate-900">
       <video ref={videoRef} playsInline autoPlay muted className="hidden" />
       
-      {/* Header */}
       <div className="flex justify-between items-center mb-6 pb-4 border-b border-slate-200">
         <div className="flex items-center gap-2">
             <img src="/logo-transparent.png" alt="Logo" className="w-6 h-6 object-contain" onError={(e) => e.target.style.display='none'} />
@@ -317,25 +355,49 @@ export default function VictimUI() {
 
       <div className="flex-1 flex flex-col gap-6">
         
-        {/* Telemetry Cards */}
+        {/* Hospital ECG Pulse Spike Monitors */}
         <div className="grid grid-cols-2 gap-4">
-          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col items-start gap-1">
-            <div className="flex items-center gap-1.5 text-slate-400 mb-1"><Activity size={14} strokeWidth={2.5}/> <span className="text-[10px] font-bold tracking-widest uppercase">Motion</span></div>
-            <div className="flex items-baseline gap-1">
-                <span className="font-mono text-3xl font-bold tracking-tight">{motionMS2.toFixed(1)}</span>
-                <span className="text-xs text-slate-400 font-medium">m/s²</span>
+          
+          {/* Motion ECG Monitor */}
+          <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md flex flex-col gap-3">
+            <div className="flex justify-between items-center text-slate-400">
+                <div className="flex items-center gap-1.5 text-blue-400"><Activity size={14} strokeWidth={2.5}/> <span className="text-[10px] font-bold tracking-widest uppercase">Motion Pulse</span></div>
+                <div className="flex items-baseline gap-1"><span className="font-mono text-xl font-bold text-white tracking-tight">{motionMS2.toFixed(1)}</span><span className="text-[10px] text-slate-400 font-medium">m/s²</span></div>
+            </div>
+            
+            <div className="w-full h-14 bg-black rounded-lg border border-slate-800 overflow-hidden relative flex items-center shadow-inner">
+                <div className="absolute inset-0 bg-[linear-gradient(to_right,#1e293b_1px,transparent_1px),linear-gradient(to_bottom,#1e293b_1px,transparent_1px)] bg-[size:14px_14px] opacity-40"></div>
+                
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="w-full h-full relative z-10">
+                    <polyline 
+                        points={motionHistory.map((val, i) => `${(i / (motionHistory.length - 1)) * 100},${val}`).join(" ")} 
+                        fill="none" stroke="#38bdf8" strokeWidth="2.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" 
+                    />
+                </svg>
             </div>
           </div>
-          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col items-start gap-1">
-            <div className="flex items-center gap-1.5 text-slate-400 mb-1"><Mic size={14} strokeWidth={2.5}/> <span className="text-[10px] font-bold tracking-widest uppercase">Audio</span></div>
-            <div className="flex items-baseline gap-1">
-                <span className="font-mono text-3xl font-bold tracking-tight">{audioDB.toFixed(0)}</span>
-                <span className="text-xs text-slate-400 font-medium">dB</span>
+          
+          {/* Audio ECG Monitor */}
+          <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md flex flex-col gap-3">
+            <div className="flex justify-between items-center text-slate-400">
+                <div className="flex items-center gap-1.5 text-red-400"><Mic size={14} strokeWidth={2.5}/> <span className="text-[10px] font-bold tracking-widest uppercase">Audio Pulse</span></div>
+                <div className="flex items-baseline gap-1"><span className="font-mono text-xl font-bold text-white tracking-tight">{audioDB.toFixed(0)}</span><span className="text-[10px] text-slate-400 font-medium">dB</span></div>
+            </div>
+            
+            <div className="w-full h-14 bg-black rounded-lg border border-slate-800 overflow-hidden relative flex items-center shadow-inner">
+                <div className="absolute inset-0 bg-[linear-gradient(to_right,#1e293b_1px,transparent_1px),linear-gradient(to_bottom,#1e293b_1px,transparent_1px)] bg-[size:14px_14px] opacity-40"></div>
+                
+                <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="w-full h-full relative z-10">
+                    <polyline 
+                        points={audioHistory.map((val, i) => `${(i / (audioHistory.length - 1)) * 100},${val}`).join(" ")} 
+                        fill="none" stroke="#f87171" strokeWidth="2.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" 
+                    />
+                </svg>
             </div>
           </div>
+
         </div>
 
-        {/* RESTORED THRESHOLD CONTROLS (shadcn style) */}
         <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col gap-4">
             <div className="flex items-center gap-2 text-slate-800 font-semibold text-sm border-b border-slate-100 pb-2">
                 <Settings2 size={16}/> Configuration
@@ -371,7 +433,6 @@ export default function VictimUI() {
         )}
       </div>
       
-      {/* Actions */}
       <div className="mt-8 flex flex-col items-center">
         <div className="text-slate-400 text-[10px] font-bold tracking-widest mb-1 uppercase">Auto-Deploy Timer</div>
         <div className="text-5xl font-extrabold text-slate-800 mb-6 tabular-nums tracking-tighter">
