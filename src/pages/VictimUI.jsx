@@ -1,11 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Activity, Mic, ShieldAlert, CheckCircle, Sliders, XCircle, Battery, Wifi, WifiOff, Minus, Plus } from 'lucide-react';
-import { doc, setDoc } from 'firebase/firestore'; // Reverted to setDoc for targeted updating
+import { collection, doc, setDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 
 export default function VictimUI() {
-  // 1. GENERATE OR FETCH PERSISTENT DEVICE ID
   const [deviceId] = useState(() => {
     let id = localStorage.getItem("pulse_device_id");
     if (!id) {
@@ -37,12 +36,15 @@ export default function VictimUI() {
   const isFalseAlarmRef = useRef(false);
   const motionThreshRef = useRef(15);
   const audioThreshRef = useRef(85);
-  const videoRef = useRef(null);
   
+  const videoRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const recognitionRef = useRef(null);
   const transcriptRef = useRef("");
+  
+  // Warmed-up Audio Context for bypassing autoplay policies
+  const audioCtxRef = useRef(null);
 
   useEffect(() => { motionThreshRef.current = motionThreshold; }, [motionThreshold]);
   useEffect(() => { audioThreshRef.current = audioThreshold; }, [audioThreshold]);
@@ -62,55 +64,12 @@ export default function VictimUI() {
     window.addEventListener('online', () => setIsOnline(true));
     window.addEventListener('offline', () => setIsOnline(false));
 
-    enableSensors();
-
     const watchId = navigator.geolocation.watchPosition(
       (pos) => { locationRef.current = { lat: pos.coords.latitude, lng: pos.coords.longitude }; }, 
       (err) => console.warn("GPS Warning:", err), 
       { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
     );
 
-    navigator.mediaDevices.getUserMedia({ audio: true, video: true }).then((stream) => {
-      if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.play(); }
-      
-      mediaRecorderRef.current = new MediaRecorder(stream);
-      mediaRecorderRef.current.ondataavailable = (e) => { 
-        if (e.data.size > 0) audioChunksRef.current.push(e.data); 
-      };
-
-      const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const analyser = audioCtx.createAnalyser();
-      const source = audioCtx.createMediaStreamSource(stream);
-      source.connect(analyser);
-      const dataArray = new Uint8Array(analyser.frequencyBinCount);
-      
-      const updateAudio = () => {
-        analyser.getByteFrequencyData(dataArray);
-        const avg = dataArray.reduce((a, b) => a + b) / dataArray.length;
-        const currentDB = Math.max(0, (avg / 255) * 120);
-        setAudioDB(currentDB);
-        
-        if (currentDB > audioThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current) {
-          triggerFalseAlarm();
-        }
-        requestAnimationFrame(updateAudio);
-      };
-      updateAudio();
-    }).catch(err => console.error("Media error:", err));
-
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      recognitionRef.current = new SpeechRecognition();
-      recognitionRef.current.continuous = true;
-      recognitionRef.current.interimResults = true;
-      recognitionRef.current.onresult = (e) => {
-        let final = "";
-        for (let i = e.resultIndex; i < e.results.length; ++i) {
-          if (e.results[i].isFinal) final += e.results[i][0].transcript;
-        }
-        transcriptRef.current += final + " ";
-      };
-    }
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
@@ -126,14 +85,74 @@ export default function VictimUI() {
   };
 
   const enableSensors = async () => {
-    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-      const p = await DeviceMotionEvent.requestPermission();
-      if (p === 'granted') { window.addEventListener('devicemotion', handleMotion); setSensorsActive(true); }
-    } else { window.addEventListener('devicemotion', handleMotion); setSensorsActive(true); }
+    // 1. Warm up the audio engine on user click so we can beep later
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    audioCtxRef.current = new AudioContext();
+    audioCtxRef.current.resume();
+
+    // 2. Request BACK camera specifically
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: true, 
+        video: { facingMode: { ideal: "environment" } } // Prioritize back camera
+      });
+
+      if (videoRef.current) { 
+        videoRef.current.srcObject = stream; 
+        videoRef.current.play(); 
+      }
+      
+      mediaRecorderRef.current = new MediaRecorder(stream);
+      mediaRecorderRef.current.ondataavailable = (e) => { 
+        if (e.data.size > 0) audioChunksRef.current.push(e.data); 
+      };
+
+      const analyser = audioCtxRef.current.createAnalyser();
+      const source = audioCtxRef.current.createMediaStreamSource(stream);
+      source.connect(analyser);
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      
+      const updateAudio = () => {
+        analyser.getByteFrequencyData(dataArray);
+        const avg = dataArray.reduce((a, b) => a + b) / dataArray.length;
+        const currentDB = Math.max(0, (avg / 255) * 120);
+        setAudioDB(currentDB);
+        
+        if (currentDB > audioThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current) {
+          triggerFalseAlarm();
+        }
+        requestAnimationFrame(updateAudio);
+      };
+      updateAudio();
+
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        recognitionRef.current = new SpeechRecognition();
+        recognitionRef.current.continuous = true;
+        recognitionRef.current.interimResults = true;
+        recognitionRef.current.onresult = (e) => {
+          let final = "";
+          for (let i = e.resultIndex; i < e.results.length; ++i) {
+            if (e.results[i].isFinal) final += e.results[i][0].transcript;
+          }
+          transcriptRef.current += final + " ";
+        };
+      }
+
+      setSensorsActive(true);
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        const p = await DeviceMotionEvent.requestPermission();
+        if (p === 'granted') window.addEventListener('devicemotion', handleMotion);
+      } else { 
+        window.addEventListener('devicemotion', handleMotion); 
+      }
+    } catch (err) {
+      console.error("Sensor initialization failed:", err);
+    }
   };
 
   const triggerFalseAlarm = () => {
-    if (isFalseAlarmRef.current || isTrappedRef.current) return;
+    if (isFalseAlarmRef.current || isTrappedRef.current || !sensorsActive) return;
     isFalseAlarmRef.current = true;
     setFalseAlarmTimer(15);
     
@@ -170,7 +189,10 @@ export default function VictimUI() {
       mediaRecorderRef.current.onstop = () => {
         clearTimeout(safetyTimer);
         if (audioChunksRef.current.length === 0) return resolve("");
-        const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        
+        // Dynamically use the OS preferred MIME type to fix iOS silence bug
+        const mimeType = mediaRecorderRef.current.mimeType || 'audio/webm';
+        const blob = new Blob(audioChunksRef.current, { type: mimeType });
         const reader = new FileReader();
         reader.onloadend = () => resolve(reader.result);
         reader.readAsDataURL(blob);
@@ -194,9 +216,13 @@ export default function VictimUI() {
       try {
         if (videoRef.current.readyState >= 2) {
           const canvas = document.createElement("canvas");
-          canvas.width = 320; canvas.height = 240;
-          canvas.getContext('2d').drawImage(videoRef.current, 0, 0, 320, 240);
-          photoData = canvas.toDataURL('image/jpeg', 0.5); 
+          // Fetch exact natural resolution of the camera stream
+          const vw = videoRef.current.videoWidth;
+          const vh = videoRef.current.videoHeight;
+          canvas.width = vw;
+          canvas.height = vh;
+          canvas.getContext('2d').drawImage(videoRef.current, 0, 0, vw, vh);
+          photoData = canvas.toDataURL('image/jpeg', 0.6); // Slightly higher quality
         }
       } catch (err) {}
     }
@@ -206,21 +232,21 @@ export default function VictimUI() {
     setIsBlackout(true);
     setFalseAlarmTimer(null);
 
-    if (!isAutoTrigger) {
-        try {
-            const audioCtx = new window.AudioContext();
-            setInterval(() => {
-                const osc = audioCtx.createOscillator();
-                osc.frequency.setValueAtTime(3000, audioCtx.currentTime);
-                osc.connect(audioCtx.destination);
-                osc.start(); osc.stop(audioCtx.currentTime + 0.3);
-            }, 2000);
-        } catch(e) {}
-    }
+    // BEEP LOGIC: Now uses the pre-warmed audio context, allowing it to bypass auto-play rules!
+    try {
+        if (!audioCtxRef.current) {
+            audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        setInterval(() => {
+            const osc = audioCtxRef.current.createOscillator();
+            osc.frequency.setValueAtTime(3000, audioCtxRef.current.currentTime);
+            osc.connect(audioCtxRef.current.destination);
+            osc.start(); osc.stop(audioCtxRef.current.currentTime + 0.3);
+        }, 2000);
+    } catch(e) {}
 
     const finalAudioBase64 = isLowBandwidth ? "" : await getProcessedAudio();
 
-    // 2. USE setDoc WITH THE PERSISTENT deviceId TO OVERWRITE OLD DOTS
     try {
         await setDoc(doc(db, "victims", deviceId), { 
             victimName: deviceId,
@@ -233,7 +259,7 @@ export default function VictimUI() {
             aiTriage: "Pending...",
             photoBase64: photoData,
             audioRecordBase64: finalAudioBase64,
-            transcript: transcriptRef.current || "No transcript available.",
+            transcript: transcriptRef.current || "No words captured.",
             audioDB: audioDB.toFixed(1),
             motionMS2: motionMS2.toFixed(2)
         });
@@ -245,7 +271,6 @@ export default function VictimUI() {
   return (
     <>
       <video ref={videoRef} playsInline autoPlay muted className="hidden" />
-
       {isBlackout ? (
         <div className="min-h-screen bg-black flex flex-col justify-center items-center p-6 text-center">
             <ShieldAlert size={64} className="text-red-500 animate-pulse mb-4" />

@@ -18,22 +18,26 @@ const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 export default function CommandCenter() {
   const [victims, setVictims] = useState([]);
 
-  const analyzeWithGemini = async (user) => {
+const analyzeWithGemini = async (user) => {
     if (user.aiTriage !== "Pending...") return;
     
     try {
-      const prompt = `You are a disaster Command Center AI. Evaluate this distress beacon:
-      Transcript: "${user.transcript || 'None'}"
-      Motion Impact: ${user.motionMS2} m/s2
-      Audio DB: ${user.audioDB} dB
+      const prompt = `You are a disaster Command Center AI evaluating a distress beacon.
+      Telemetry Data:
+      - Transcript: "${user.transcript || 'None'}"
+      - Motion Impact: ${user.motionMS2} m/s2
+      - Audio Decibels: ${user.audioDB} dB
       
-      Respond STRICTLY in two lines:
-      Line 1: A concise 1-sentence assessment summarizing their condition.
+      CRITICAL INSTRUCTIONS:
+      1. If an image is provided, you MUST describe what you see (e.g., collapsed structure, dark environment, outdoor terrain). 
+      2. If no image is provided, base your assessment solely on the transcript and telemetry.
+      
+      Respond STRICTLY in exactly two lines:
+      Line 1: A 1-2 sentence detailed assessment of the situation combining the visual data and audio data.
       Line 2: "[PRIORITY: X/10]"`;
 
       const parts = [{ text: prompt }];
       
-      // Only attach image if it explicitly exists and is valid
       if (user.photoBase64 && user.photoBase64.includes(",")) {
         parts.push({ inline_data: { mime_type: "image/jpeg", data: user.photoBase64.split(",")[1] } });
       }
@@ -49,11 +53,10 @@ export default function CommandCenter() {
       const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "Assessment unavailable.";
       await updateDoc(doc(db, "victims", user.id), { aiTriage: text });
     } catch (error) {
-      // Fallback if API fails or rate limits
       await updateDoc(doc(db, "victims", user.id), { aiTriage: "AI Offline: Review telemetry manually.\n[PRIORITY: 8/10]" });
     }
   };
-
+  
   useEffect(() => {
     const unsubscribe = onSnapshot(collection(db, "victims"), (snapshot) => {
       const activeUsers = snapshot.docs.map(d => ({ id: d.id, ...d.data() })).sort((a,b) => b.timestamp - a.timestamp);
