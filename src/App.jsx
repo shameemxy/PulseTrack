@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import VictimUI from './pages/VictimUI';
 import CommandCenter from './pages/CommandCenter';
 import RescueTeam from './pages/RescueTeam';
@@ -9,16 +9,12 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<VictimUI />} />
-        
-        {/* Command Center Routes */}
         <Route path="/command-center" element={<CommandCenter />} />
-        <Route path="/CommandCentre" element={<CommandCenter />} />
-        
-        {/* Rescue Team Route */}
         <Route path="/rescue" element={<RescueTeam />} />
-        
-        {/* Safe Citizen Route */}
         <Route path="/safe" element={<SafeUI />} />
+        
+        {/* Fallback: If a user types a wrong URL, redirect them to the home page */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
   );

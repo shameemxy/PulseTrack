@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Activity, Mic, ShieldAlert, CheckCircle, Sliders, XCircle, Battery, Wifi, WifiOff, Minus, Plus } from 'lucide-react';
-import { collection, doc, setDoc } from 'firebase/firestore';
+import { Activity, Mic, ShieldAlert, CheckCircle, XCircle, Battery, Wifi, WifiOff, Minus, Plus, Settings2 } from 'lucide-react';
+import { doc, setDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 
 export default function VictimUI() {
@@ -25,20 +25,18 @@ export default function VictimUI() {
   const [falseAlarmTimer, setFalseAlarmTimer] = useState(null);
   const [sensorsActive, setSensorsActive] = useState(false);
   
-  // Set battery to null so it completely hides on iOS instead of showing "--"
   const [batteryLvl, setBatteryLvl] = useState(null); 
   const [networkType, setNetworkType] = useState('4g');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   const navigate = useNavigate();
   
-  // REFS: These bypass React's stale state to guarantee the sensors trigger
   const locationRef = useRef({ lat: 12.9525, lng: 74.8806 });
   const isTrappedRef = useRef(false);
   const isFalseAlarmRef = useRef(false);
   const motionThreshRef = useRef(15);
   const audioThreshRef = useRef(85);
-  const sensorsActiveRef = useRef(false); // CRITICAL BUG FIX FOR STALE CLOSURE
+  const sensorsActiveRef = useRef(false);
   
   const videoRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -82,7 +80,6 @@ export default function VictimUI() {
       const movement = Math.abs(Math.sqrt(x*x + y*y + z*z) - 9.8); 
       setMotionMS2(movement);
       
-      // Now strictly relies on the mutable Ref to guarantee it fires
       if (movement > motionThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current) {
         triggerFalseAlarm();
       }
@@ -90,7 +87,7 @@ export default function VictimUI() {
   };
 
   const enableSensors = async () => {
-    sensorsActiveRef.current = true; // Instantly bypasses React state lag
+    sensorsActiveRef.current = true;
     setSensorsActive(true);
 
     let motionGranted = false;
@@ -103,9 +100,7 @@ export default function VictimUI() {
       motionGranted = true; 
     }
 
-    if (motionGranted) {
-      window.addEventListener('devicemotion', handleMotion);
-    }
+    if (motionGranted) window.addEventListener('devicemotion', handleMotion);
 
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     audioCtxRef.current = new AudioContext();
@@ -138,7 +133,6 @@ export default function VictimUI() {
         const currentDB = Math.max(0, (avg / 255) * 120);
         setAudioDB(currentDB);
         
-        // Also uses the mutable Ref to guarantee it fires
         if (currentDB > audioThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current) {
           triggerFalseAlarm();
         }
@@ -165,7 +159,6 @@ export default function VictimUI() {
   };
 
   const triggerFalseAlarm = () => {
-    // If the ref is false, it won't fire. But since we force it to true, it will always fire!
     if (isFalseAlarmRef.current || isTrappedRef.current || !sensorsActiveRef.current) return;
     
     isFalseAlarmRef.current = true;
@@ -231,9 +224,9 @@ export default function VictimUI() {
           const canvas = document.createElement("canvas");
           const vw = videoRef.current.videoWidth;
           const vh = videoRef.current.videoHeight;
-          canvas.width = vw;
-          canvas.height = vh;
-          canvas.getContext('2d').drawImage(videoRef.current, 0, 0, vw, vh);
+          canvas.width = 480; 
+          canvas.height = 640;
+          canvas.getContext('2d').drawImage(videoRef.current, 0, 0, 480, 640);
           photoData = canvas.toDataURL('image/jpeg', 0.6); 
         }
       } catch (err) {}
@@ -279,92 +272,123 @@ export default function VictimUI() {
     }
   };
 
+  // 1. SURVIVAL MODE UI (Clean & Stark)
+  if (isBlackout) return (
+    <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-6 text-center">
+        <ShieldAlert size={64} className="text-red-600 mb-4" />
+        <h1 className="text-slate-900 text-2xl font-bold uppercase tracking-wide">Emergency Beacon Active</h1>
+        <p className="text-slate-500 font-medium mt-2">Command Center has been notified.</p>
+    </div>
+  );
+
+  // 2. FALSE ALARM TRIGGER UI (High Contrast)
+  if (falseAlarmTimer !== null) return (
+    <div className="min-h-screen bg-red-600 flex flex-col justify-center items-center p-6 text-center text-white z-50 fixed inset-0">
+        <ShieldAlert size={80} className="text-white animate-pulse mb-6" />
+        <h1 className="text-3xl font-bold mb-2 uppercase tracking-wider">Critical Event Detected</h1>
+        <p className="text-red-100 mb-2 font-medium">Recording telemetry...</p>
+        <div className="text-8xl font-bold mb-12 tabular-nums">{falseAlarmTimer}</div>
+        <button onClick={cancelFalseAlarm} className="w-full bg-white text-red-600 p-5 rounded-lg shadow-lg flex justify-center items-center gap-3 text-lg font-bold uppercase tracking-wide hover:bg-slate-50 transition">
+            <XCircle size={28} /> Cancel Alarm (Safe)
+        </button>
+    </div>
+  );
+
+  // 3. MAIN ENTERPRISE UI
   return (
-    <>
+    <div className="min-h-screen bg-slate-50 p-6 flex flex-col font-sans text-slate-900">
       <video ref={videoRef} playsInline autoPlay muted className="hidden" />
-      {isBlackout ? (
-        <div className="min-h-screen bg-black flex flex-col justify-center items-center p-6 text-center">
-            <ShieldAlert size={64} className="text-red-500 animate-pulse mb-4" />
-            <h1 className="text-red-500 text-2xl font-bold">SURVIVAL MODE</h1>
-            <p className="text-red-500/50">Incident payload delivered securely.</p>
+      
+      {/* Header */}
+      <div className="flex justify-between items-center mb-6 pb-4 border-b border-slate-200">
+        <div className="flex items-center gap-2">
+            <img src="/logo-transparent.png" alt="Logo" className="w-6 h-6 object-contain" onError={(e) => e.target.style.display='none'} />
+            <h1 className="text-lg font-bold tracking-tight">PULSETRACK</h1>
         </div>
-      ) : falseAlarmTimer !== null ? (
-        <div className="min-h-screen bg-red-900/90 flex flex-col justify-center items-center p-6 text-center text-white z-50 fixed inset-0">
-            <ShieldAlert size={80} className="text-white animate-bounce mb-6" />
-            <h1 className="text-3xl font-bold mb-2">EMERGENCY TRIGGERED</h1>
-            <p className="text-xl mb-2">Recording audio & transcribing...</p>
-            <div className="text-8xl font-bold mb-12">{falseAlarmTimer}</div>
-            <button onClick={cancelFalseAlarm} className="w-full bg-emerald-500 p-6 rounded-2xl flex justify-center items-center gap-3 text-xl font-bold">
-                <XCircle size={32} /> I AM SAFE (CANCEL)
-            </button>
+        <div className="flex gap-4 text-xs font-semibold text-slate-500 items-center">
+          <span className={`flex items-center gap-1 ${isOnline ? 'text-blue-600' : 'text-red-600'}`}>
+            {isOnline ? <Wifi size={14} strokeWidth={2.5}/> : <WifiOff size={14} strokeWidth={2.5}/>} {networkType.toUpperCase()}
+          </span>
+          {batteryLvl !== null && (
+            <span className="flex items-center gap-1 text-slate-600"><Battery size={14} strokeWidth={2.5}/> {batteryLvl}%</span>
+          )}
         </div>
-      ) : (
-        <div className="min-h-screen bg-black p-6 flex flex-col font-sans">
-          <div className="flex justify-between items-center mb-6">
-            <h1 className="text-xl font-bold text-cyan-400">PULSE TRACK</h1>
-            <div className="flex gap-3 text-xs font-mono items-center">
-              <span className={`flex items-center gap-1 ${isOnline ? 'text-emerald-400' : 'text-red-400'}`}>
-                {isOnline ? <Wifi size={14}/> : <WifiOff size={14}/>} {networkType.toUpperCase()}
-              </span>
-              {/* Only renders battery component if the device actually supports the API */}
-              {batteryLvl !== null && (
-                <span className="text-emerald-400 flex items-center gap-1"><Battery size={14}/> {batteryLvl}%</span>
-              )}
+      </div>
+
+      <div className="flex-1 flex flex-col gap-6">
+        
+        {/* Telemetry Cards */}
+        <div className="grid grid-cols-2 gap-4">
+          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col items-start gap-1">
+            <div className="flex items-center gap-1.5 text-slate-400 mb-1"><Activity size={14} strokeWidth={2.5}/> <span className="text-[10px] font-bold tracking-widest uppercase">Motion</span></div>
+            <div className="flex items-baseline gap-1">
+                <span className="font-mono text-3xl font-bold tracking-tight">{motionMS2.toFixed(1)}</span>
+                <span className="text-xs text-slate-400 font-medium">m/s²</span>
             </div>
           </div>
-          <div className="flex-1 flex flex-col gap-4">
-            <div className="bg-white/5 p-5 rounded-3xl border border-white/10 flex flex-col gap-5">
-                <div className="flex justify-between items-center text-gray-400 font-bold">
-                    <span className="flex items-center gap-2"><Activity size={18}/> MOTION (m/s²)</span>
-                    <div className="flex items-center gap-3 bg-black rounded-lg border border-gray-800 p-1">
-                        <button onClick={() => setMotionThreshold(p => Math.max(2, p - 1))} className="p-2 hover:bg-white/10 rounded text-cyan-400"><Minus size={16}/></button>
-                        <span className="w-8 text-center text-cyan-400 font-mono text-lg">{motionThreshold}</span>
-                        <button onClick={() => setMotionThreshold(p => Math.min(50, p + 1))} className="p-2 hover:bg-white/10 rounded text-cyan-400"><Plus size={16}/></button>
-                    </div>
+          <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col items-start gap-1">
+            <div className="flex items-center gap-1.5 text-slate-400 mb-1"><Mic size={14} strokeWidth={2.5}/> <span className="text-[10px] font-bold tracking-widest uppercase">Audio</span></div>
+            <div className="flex items-baseline gap-1">
+                <span className="font-mono text-3xl font-bold tracking-tight">{audioDB.toFixed(0)}</span>
+                <span className="text-xs text-slate-400 font-medium">dB</span>
+            </div>
+          </div>
+        </div>
+
+        {/* RESTORED THRESHOLD CONTROLS (shadcn style) */}
+        <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col gap-4">
+            <div className="flex items-center gap-2 text-slate-800 font-semibold text-sm border-b border-slate-100 pb-2">
+                <Settings2 size={16}/> Configuration
+            </div>
+            
+            <div className="flex justify-between items-center">
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Motion Trigger</span>
+                <div className="flex items-center bg-slate-100 p-1 rounded-lg border border-slate-200">
+                    <button onClick={() => setMotionThreshold(p => Math.max(2, p - 1))} className="p-1.5 hover:bg-white rounded-md text-slate-600 shadow-sm transition"><Minus size={14}/></button>
+                    <span className="w-10 text-center font-mono font-bold text-sm text-slate-800">{motionThreshold}</span>
+                    <button onClick={() => setMotionThreshold(p => Math.min(50, p + 1))} className="p-1.5 hover:bg-white rounded-md text-slate-600 shadow-sm transition"><Plus size={14}/></button>
                 </div>
-                <div className="flex justify-between items-center text-gray-400 font-bold">
-                    <span className="flex items-center gap-2"><Mic size={18}/> AUDIO (dB)</span>
-                    <div className="flex items-center gap-3 bg-black rounded-lg border border-gray-800 p-1">
-                        <button onClick={() => setAudioThreshold(p => Math.max(10, p - 5))} className="p-2 hover:bg-white/10 rounded text-blue-400"><Minus size={16}/></button>
-                        <span className="w-8 text-center text-blue-400 font-mono text-lg">{audioThreshold}</span>
-                        <button onClick={() => setAudioThreshold(p => Math.min(120, p + 5))} className="p-2 hover:bg-white/10 rounded text-blue-400"><Plus size={16}/></button>
-                    </div>
+            </div>
+            
+            <div className="flex justify-between items-center">
+                <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Audio Trigger</span>
+                <div className="flex items-center bg-slate-100 p-1 rounded-lg border border-slate-200">
+                    <button onClick={() => setAudioThreshold(p => Math.max(10, p - 5))} className="p-1.5 hover:bg-white rounded-md text-slate-600 shadow-sm transition"><Minus size={14}/></button>
+                    <span className="w-10 text-center font-mono font-bold text-sm text-slate-800">{audioThreshold}</span>
+                    <button onClick={() => setAudioThreshold(p => Math.min(120, p + 5))} className="p-1.5 hover:bg-white rounded-md text-slate-600 shadow-sm transition"><Plus size={14}/></button>
                 </div>
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="bg-white/5 p-5 rounded-3xl border border-white/10 flex flex-col items-center justify-center gap-2">
-                <Activity className="text-cyan-400" size={32} />
-                <span className="text-gray-400 text-xs font-bold">LIVE MOTION</span>
-                <span className="font-mono text-cyan-400 text-2xl">{motionMS2.toFixed(1)}</span>
-              </div>
-              <div className="bg-white/5 p-5 rounded-3xl border border-white/10 flex flex-col items-center justify-center gap-2">
-                <Mic className="text-blue-400" size={32} />
-                <span className="text-gray-400 text-xs font-bold">LIVE AUDIO</span>
-                <span className="font-mono text-blue-400 text-2xl">{audioDB.toFixed(0)}</span>
-              </div>
-            </div>
-            {!sensorsActive && (
-              <button onClick={enableSensors} className="w-full bg-cyan-500/20 text-cyan-400 py-4 rounded-2xl font-bold tracking-widest border border-cyan-500/30">INITIALIZE SENSORS</button>
-            )}
-          </div>
-          <div className="mt-4 flex flex-col items-center">
-            <div className="text-6xl font-bold text-white mb-1">
-                {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
-            </div>
-            <p className="text-gray-400 text-sm mb-4 tracking-widest">AUTO-TRIGGER TIMER</p>
-            <div className="w-full flex gap-4">
-              <button onClick={() => navigate('/safe')} className="flex-1 bg-white/10 border border-emerald-500/50 p-4 rounded-2xl flex flex-col items-center gap-2">
-                <CheckCircle className="text-emerald-400" size={28} />
-                <span className="text-emerald-400 font-bold">I AM SAFE</span>
-              </button>
-              <button onClick={() => handleTrapped(false)} className="flex-1 bg-red-500/20 border border-red-500/50 p-4 rounded-2xl flex flex-col items-center gap-2">
-                <ShieldAlert className="text-red-400" size={28} />
-                <span className="text-red-400 font-bold">I AM TRAPPED</span>
-              </button>
-            </div>
-          </div>
         </div>
-      )}
-    </>
+
+        {!sensorsActive ? (
+          <button onClick={enableSensors} className="w-full bg-slate-900 hover:bg-slate-800 text-slate-50 py-3.5 rounded-xl font-semibold shadow-md transition flex items-center justify-center gap-2">
+            Initialize Tracking Sensors
+          </button>
+        ) : (
+          <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 p-3.5 rounded-xl text-sm font-medium flex items-center justify-center gap-2">
+            <CheckCircle size={18}/> Sensors Online & Monitoring
+          </div>
+        )}
+      </div>
+      
+      {/* Actions */}
+      <div className="mt-8 flex flex-col items-center">
+        <div className="text-slate-400 text-[10px] font-bold tracking-widest mb-1 uppercase">Auto-Deploy Timer</div>
+        <div className="text-5xl font-extrabold text-slate-800 mb-6 tabular-nums tracking-tighter">
+            {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
+        </div>
+        
+        <div className="w-full flex gap-3">
+          <button onClick={() => navigate('/safe')} className="flex-1 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 p-4 rounded-xl flex flex-col items-center gap-2 shadow-sm transition">
+            <CheckCircle size={22} strokeWidth={2}/>
+            <span className="font-semibold text-sm">Mark Safe</span>
+          </button>
+          <button onClick={() => handleTrapped(false)} className="flex-1 bg-red-600 hover:bg-red-700 text-white shadow-md p-4 rounded-xl flex flex-col items-center gap-2 transition">
+            <ShieldAlert size={22} strokeWidth={2}/>
+            <span className="font-semibold text-sm uppercase tracking-wide">SOS Override</span>
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

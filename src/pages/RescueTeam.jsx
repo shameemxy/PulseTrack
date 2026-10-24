@@ -4,16 +4,14 @@ import { db } from '../firebase';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { Target, MapPin, Battery, Navigation, BrainCircuit, Play, Clock, Wifi, Camera } from 'lucide-react';
+import { Target, MapPin, Battery, Navigation, Play, Clock, Wifi, Camera, MessageSquare } from 'lucide-react';
 
-// Default Victim Icon (Red)
 const victimIcon = new L.Icon({
   iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
   iconSize: [25, 41], iconAnchor: [12, 41]
 });
 
-// Rescuer Icon (Blue)
 const rescuerIcon = new L.Icon({
   iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png',
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
@@ -25,14 +23,12 @@ export default function RescueTeam() {
   const [rescuerLocation, setRescuerLocation] = useState(null);
 
   useEffect(() => {
-    // 1. Pull live trapped victims and their AI triage from Firebase
     const q = query(collection(db, "victims"), where("status", "==", "TRAPPED"));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const activeTargets = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a,b) => b.timestamp - a.timestamp);
       setTargets(activeTargets);
     });
 
-    // 2. Track the Ground Rescuer's LIVE location
     const geoId = navigator.geolocation.watchPosition(
       (pos) => setRescuerLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
       (err) => console.warn("Rescue GPS Error:", err),
@@ -46,101 +42,111 @@ export default function RescueTeam() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-black p-6 font-sans flex flex-col">
-      <div className="flex items-center justify-between mb-6 border-b border-white/10 pb-4">
+    // Restricted to h-screen so the list handles internal scrolling perfectly on phones
+    <div className="h-screen bg-slate-50 p-4 font-sans text-slate-900 flex flex-col overflow-hidden">
+      
+      {/* Tactical Header */}
+      <div className="flex items-center justify-between bg-white border border-slate-200 p-3 rounded-xl shadow-sm mb-4 flex-none">
         <div className="flex items-center gap-3">
-          <Target className="text-blue-500" size={32} />
-          <h1 className="text-2xl font-bold text-blue-500">GROUND RESCUE TERMINAL</h1>
+          <img src="/logo-transparent.png" alt="Logo" className="w-7 h-7 object-contain" onError={(e) => e.target.style.display='none'} />
+          <div>
+            <h1 className="text-base font-bold tracking-tight text-slate-800">Rescue Terminal</h1>
+            <div className="text-[10px] text-blue-600 font-bold tracking-widest uppercase flex items-center gap-1">
+                <Target size={10}/> Active Unit Tracking
+            </div>
+          </div>
         </div>
-        <div className="text-emerald-500 font-mono text-sm border border-emerald-500 px-3 py-1 rounded">
-          {targets.length} ACTIVE EXTRACTIONS
+        <div className="bg-red-50 px-3 py-1.5 rounded border border-red-200 font-bold flex items-center gap-1.5 text-xs text-red-700 shadow-sm">
+            {targets.length} TARGETS
         </div>
       </div>
       
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-4 gap-6">
-        
-        {/* TARGET LIST WITH AI CONTEXT */}
-        <div className="flex flex-col gap-4 overflow-y-auto h-[700px] pr-2">
-          {targets.map(target => (
-            <div key={target.id} className="bg-white/5 border border-blue-500/30 rounded-xl p-4 flex flex-col gap-3">
-              
-              <div className="flex justify-between items-start">
-                <div>
-                    <span className="font-bold text-white text-lg">{target.victimName || target.id}</span>
-                    <div className="text-gray-400 text-[10px] flex items-center gap-1 mt-1 font-mono">
-                        <Clock size={10}/> {new Date(target.timestamp).toLocaleTimeString()}
-                    </div>
-                </div>
-                <div className="flex flex-col items-end gap-1 text-xs font-mono">
-                    <span className="text-emerald-400 flex items-center gap-1"><Battery size={12}/>{target.battery || "--"}%</span>
-                    <span className="text-blue-400 flex items-center gap-1"><Wifi size={12}/>{target.packetType || "HIGH"}</span>
-                </div>
-              </div>
+      {/* Compact Tactical Map (Fixed Height for Mobile) */}
+      <div className="h-48 md:h-64 rounded-xl overflow-hidden border border-slate-200 shadow-sm mb-4 relative z-0 flex-none bg-white">
+        <MapContainer center={rescuerLocation ? [rescuerLocation.lat, rescuerLocation.lng] : [12.9525, 74.8806]} zoom={13} style={{ height: '100%', width: '100%' }}>
+          <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+          
+          {targets.map((user) => (
+            user.lat && user.lng ? (
+              <Marker key={user.id} position={[user.lat, user.lng]} icon={victimIcon}>
+                <Popup className="font-sans">
+                  <b className="text-red-600 text-sm">{user.victimName || user.id}</b><br/>
+                  <span className="text-xs text-slate-600 font-medium">
+                      {user.aiTriage !== "Pending..." ? (user.aiTriage || "Requires Extraction").split('\n')[1] || "Needs Extraction" : "Needs Extraction"}
+                  </span>
+                </Popup>
+              </Marker>
+            ) : null
+          ))}
 
-              {/* AI TRIAGE BLOCK */}
-              <div className="bg-black/50 p-3 rounded-lg border border-cyan-500/30">
-                  <div className="text-[10px] text-cyan-400 font-bold mb-1 flex items-center gap-1"><BrainCircuit size={12}/> CCAI ASSESSMENT</div>
-                  <p className={`text-sm whitespace-pre-line ${target.aiTriage === 'Pending...' ? 'text-gray-500 italic animate-pulse' : 'text-white'}`}>
-                      {target.aiTriage}
-                  </p>
-              </div>
+          {rescuerLocation && (
+            <Marker position={[rescuerLocation.lat, rescuerLocation.lng]} icon={rescuerIcon}>
+              <Popup className="font-sans"><b className="text-blue-600">Alpha Unit</b><br/><span className="text-xs">Your Location</span></Popup>
+            </Marker>
+          )}
+        </MapContainer>
+      </div>
 
-              {/* MEDIA BLOCK (AUDIO/PHOTO) */}
-              <div className="flex flex-col gap-2">
-                {target.audioRecordBase64 && (
-                    <div>
-                        <span className="text-[10px] text-blue-400 font-bold block mb-1 flex items-center gap-1"><Play size={10}/> AUDIO</span>
-                        <audio controls src={target.audioRecordBase64} className="w-full h-8 rounded bg-gray-800" />
-                    </div>
-                )}
-                {target.photoBase64 && (
-                    <div>
-                        <span className="text-[10px] text-gray-400 font-bold block mb-1 flex items-center gap-1"><Camera size={10}/> PHOTO</span>
-                        <img src={target.photoBase64} alt="incident" className="w-full h-24 object-cover rounded-md border border-white/10" />
-                    </div>
-                )}
-              </div>
+      <div className="flex items-center gap-2 text-xs font-bold text-slate-500 mb-2 px-1 uppercase tracking-wider flex-none">
+        <Navigation size={14} className="text-blue-600"/> Active Extractions
+      </div>
 
-              {/* ROUTING CONTROLS */}
-              <div className="text-xs font-mono text-gray-400 flex flex-col gap-1 border-t border-white/10 pt-3">
-                <span className="flex items-center gap-1"><MapPin size={12}/> {target.lat?.toFixed(5)}, {target.lng?.toFixed(5)}</span>
+      {/* Scrollable Target List */}
+      <div className="flex-1 overflow-y-auto flex flex-col gap-4 pb-6 scroll-smooth">
+        {targets.map(target => (
+          <div key={target.id} className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col gap-3 shadow-sm relative overflow-hidden flex-none">
+            
+            <div className={`absolute top-0 left-0 w-1.5 h-full ${(target.aiTriage || "").includes("9") || (target.aiTriage || "").includes("10") ? 'bg-red-500' : 'bg-blue-500'}`}></div>
+
+            <div className="flex justify-between items-start pl-2">
+              <div>
+                  <span className="font-bold text-slate-800 text-sm">{target.victimName || target.id}</span>
+                  <div className="text-slate-500 text-[10px] flex items-center gap-1 mt-1 font-mono">
+                      <Clock size={10}/> {target.timestamp ? new Date(target.timestamp).toLocaleTimeString() : "Time Unknown"}
+                  </div>
               </div>
+              <div className="flex flex-col items-end gap-1 text-[10px] font-semibold text-slate-500">
+                  <span className="flex items-center gap-1"><Battery size={12} className="text-emerald-500"/>{target.battery || "--"}%</span>
+                  <span className="flex items-center gap-1"><Wifi size={12} className="text-blue-500"/>{target.packetType || "HIGH"}</span>
+              </div>
+            </div>
+
+            <div className="ml-2 bg-slate-50 p-2.5 rounded-md border border-slate-100">
+                <div className="text-[10px] text-blue-600 font-bold mb-1 flex items-center gap-1"><MessageSquare size={12}/> CCAI ASSESSMENT</div>
+                <p className={`text-xs font-medium leading-relaxed ${target.aiTriage === 'Pending...' ? 'text-slate-400 italic animate-pulse' : 'text-slate-700'}`}>
+                    {target.aiTriage || "Assessment Pending..."}
+                </p>
+            </div>
+
+            <div className="flex flex-col gap-2 ml-2">
+              {target.audioRecordBase64 && (
+                  <div>
+                      <span className="text-[10px] text-slate-500 font-bold block mb-1 flex items-center gap-1"><Play size={10}/> Audio Intelligence</span>
+                      <audio controls src={target.audioRecordBase64} className="w-full h-8" />
+                  </div>
+              )}
+              {target.photoBase64 && (
+                  <div>
+                      <span className="text-[10px] text-slate-500 font-bold block mb-1 flex items-center gap-1"><Camera size={10}/> Visual Recon</span>
+                      <img src={target.photoBase64} alt="incident" className="w-full h-32 object-cover rounded border border-slate-200" />
+                  </div>
+              )}
+            </div>
+
+            <div className="ml-2 mt-2">
               <a 
                 href={`https://www.google.com/maps/dir/?api=1&destination=${target.lat},${target.lng}`} 
                 target="_blank" rel="noreferrer"
-                className="block text-center w-full bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold py-3 rounded transition flex justify-center items-center gap-2"
+                className="block text-center w-full bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold py-3.5 rounded-lg transition shadow-md flex justify-center items-center gap-2"
               >
-                <Navigation size={14}/> EXTERNAL ROUTING
+                <MapPin size={14}/> Route to Extrac Point
               </a>
             </div>
-          ))}
-        </div>
-
-        {/* MASTER MAP */}
-        <div className="lg:col-span-3 rounded-3xl overflow-hidden border border-white/10 h-[700px] z-0">
-          <MapContainer center={[12.9525, 74.8806]} zoom={13} style={{ height: '100%', width: '100%' }}>
-            <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
-            
-            {/* Render Victims */}
-            {targets.map((user) => (
-              user.lat && user.lng ? (
-                <Marker key={user.id} position={[user.lat, user.lng]} icon={victimIcon}>
-                  <Popup>
-                    <b>{user.victimName || user.id}</b><br/>
-                    {user.aiTriage !== "Pending..." ? user.aiTriage.split('\n')[1] : "Needs Extraction"}
-                  </Popup>
-                </Marker>
-              ) : null
-            ))}
-
-            {/* Render LIVE Rescuer Position */}
-            {rescuerLocation && (
-              <Marker position={[rescuerLocation.lat, rescuerLocation.lng]} icon={rescuerIcon}>
-                <Popup><b>YOUR LOCATION</b><br/>Ground Team Alpha.</Popup>
-              </Marker>
-            )}
-          </MapContainer>
-        </div>
+          </div>
+        ))}
+        {targets.length === 0 && (
+          <div className="text-center text-sm text-slate-400 font-medium py-10 bg-white border border-slate-200 rounded-xl">All sectors clear.</div>
+        )}
       </div>
     </div>
   );
