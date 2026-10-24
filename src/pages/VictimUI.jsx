@@ -23,7 +23,6 @@ export default function VictimUI() {
   const currentMotionRef = useRef(0);
   const currentAudioRef = useRef(0);
   
-  // Ref to track the previous frame's axes for Delta calculation
   const lastAccRef = useRef({ x: null, y: null, z: null });
   
   const [motionThreshold, setMotionThreshold] = useState(15);
@@ -60,7 +59,6 @@ export default function VictimUI() {
   useEffect(() => {
     const interval = setInterval(() => {
       const mVal = currentMotionRef.current;
-      // Multiply the visual spike so small movements look significant on the graph
       const motionY = 50 + (mVal > 0.5 ? (Math.random() > 0.5 ? -mVal * 3 : mVal * 3) : (Math.random() * 4 - 2));
 
       const aVal = currentAudioRef.current;
@@ -72,14 +70,41 @@ export default function VictimUI() {
     return () => clearInterval(interval);
   }, []);
 
+  // FIXED: Independent Main Countdown Timer
   useEffect(() => {
-    if (timeLeft > 0 && !isBlackout && falseAlarmTimer === null) {
-      const timer = setInterval(() => setTimeLeft(prev => prev - 1), 1000);
-      return () => clearInterval(timer);
-    } else if (timeLeft === 0 && !isBlackout) {
-      handleTrapped(true);
-    }
-  }, [timeLeft, isBlackout, falseAlarmTimer]);
+    if (isBlackout || falseAlarmTimer !== null) return;
+    
+    const mainTimer = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(mainTimer);
+          handleTrapped(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    
+    return () => clearInterval(mainTimer);
+  }, [isBlackout, falseAlarmTimer]);
+
+  // FIXED: Independent False Alarm Timer
+  useEffect(() => {
+    if (falseAlarmTimer === null) return;
+    
+    const alarmTimer = setInterval(() => {
+      setFalseAlarmTimer((prev) => {
+        if (prev <= 1) {
+          clearInterval(alarmTimer);
+          handleTrapped(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(alarmTimer);
+  }, [falseAlarmTimer]);
 
   useEffect(() => {
     if (navigator.getBattery) {
@@ -98,40 +123,31 @@ export default function VictimUI() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // THE FIX: Delta-Based Motion Handling
   const handleMotion = (event) => {
     if (isTrappedRef.current) return;
 
-    // Grab whatever acceleration data the device allows
     const acc = event.acceleration || event.accelerationIncludingGravity;
     if (!acc || acc.x === null) return;
 
     const { x, y, z } = acc;
 
-    // If this is the first frame, save it and skip math
     if (lastAccRef.current.x === null) {
         lastAccRef.current = { x, y, z };
         return;
     }
 
-    // Calculate the exact difference (Delta) between this frame and the last frame
     const deltaX = Math.abs(x - lastAccRef.current.x);
     const deltaY = Math.abs(y - lastAccRef.current.y);
     const deltaZ = Math.abs(z - lastAccRef.current.z);
 
-    // Sum the deltas to get pure movement intensity (ignoring static gravity)
     let movement = deltaX + deltaY + deltaZ;
-
-    // Update the ref for the next frame
     lastAccRef.current = { x, y, z };
 
-    // Noise gate: ignore tiny micro-vibrations
     if (movement < 0.5) movement = 0;
 
     currentMotionRef.current = movement;
     setMotionMS2(movement);
     
-    // Trigger alarm if shaking exceeds threshold
     if (movement > motionThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current) {
       triggerFalseAlarm();
     }
