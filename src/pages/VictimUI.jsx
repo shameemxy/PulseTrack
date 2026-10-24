@@ -25,18 +25,20 @@ export default function VictimUI() {
   const [falseAlarmTimer, setFalseAlarmTimer] = useState(null);
   const [sensorsActive, setSensorsActive] = useState(false);
   
-  // Default to "--" for iPhones since Apple blocks the Battery API
-  const [batteryLvl, setBatteryLvl] = useState("--");
+  // Set battery to null so it completely hides on iOS instead of showing "--"
+  const [batteryLvl, setBatteryLvl] = useState(null); 
   const [networkType, setNetworkType] = useState('4g');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   const navigate = useNavigate();
   
+  // REFS: These bypass React's stale state to guarantee the sensors trigger
   const locationRef = useRef({ lat: 12.9525, lng: 74.8806 });
   const isTrappedRef = useRef(false);
   const isFalseAlarmRef = useRef(false);
   const motionThreshRef = useRef(15);
   const audioThreshRef = useRef(85);
+  const sensorsActiveRef = useRef(false); // CRITICAL BUG FIX FOR STALE CLOSURE
   
   const videoRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -79,14 +81,18 @@ export default function VictimUI() {
       const { x, y, z } = event.accelerationIncludingGravity;
       const movement = Math.abs(Math.sqrt(x*x + y*y + z*z) - 9.8); 
       setMotionMS2(movement);
-      if (movement > motionThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current) {
+      
+      // Now strictly relies on the mutable Ref to guarantee it fires
+      if (movement > motionThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current) {
         triggerFalseAlarm();
       }
     }
   };
 
   const enableSensors = async () => {
-    // 1. CRITICAL iOS FIX: Ask for motion IMMEDIATELY on click before awaiting camera
+    sensorsActiveRef.current = true; // Instantly bypasses React state lag
+    setSensorsActive(true);
+
     let motionGranted = false;
     if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
       try {
@@ -94,19 +100,17 @@ export default function VictimUI() {
         if (p === 'granted') motionGranted = true;
       } catch (err) { console.warn("Motion permission denied", err); }
     } else {
-      motionGranted = true; // Android allows it by default
+      motionGranted = true; 
     }
 
     if (motionGranted) {
       window.addEventListener('devicemotion', handleMotion);
     }
 
-    // 2. Warm up audio context
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     audioCtxRef.current = new AudioContext();
     audioCtxRef.current.resume();
 
-    // 3. Now request the Camera and Microphone
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: true, 
@@ -134,7 +138,8 @@ export default function VictimUI() {
         const currentDB = Math.max(0, (avg / 255) * 120);
         setAudioDB(currentDB);
         
-        if (currentDB > audioThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current) {
+        // Also uses the mutable Ref to guarantee it fires
+        if (currentDB > audioThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current) {
           triggerFalseAlarm();
         }
         requestAnimationFrame(updateAudio);
@@ -154,16 +159,15 @@ export default function VictimUI() {
           transcriptRef.current += final + " ";
         };
       }
-      
-      setSensorsActive(true);
     } catch (err) {
       console.error("Camera/Mic initialization failed:", err);
-      setSensorsActive(true); // Still activate UI so user knows system tried
     }
   };
 
   const triggerFalseAlarm = () => {
-    if (isFalseAlarmRef.current || isTrappedRef.current || !sensorsActive) return;
+    // If the ref is false, it won't fire. But since we force it to true, it will always fire!
+    if (isFalseAlarmRef.current || isTrappedRef.current || !sensorsActiveRef.current) return;
+    
     isFalseAlarmRef.current = true;
     setFalseAlarmTimer(15);
     
@@ -302,7 +306,10 @@ export default function VictimUI() {
               <span className={`flex items-center gap-1 ${isOnline ? 'text-emerald-400' : 'text-red-400'}`}>
                 {isOnline ? <Wifi size={14}/> : <WifiOff size={14}/>} {networkType.toUpperCase()}
               </span>
-              <span className="text-emerald-400 flex items-center gap-1"><Battery size={14}/> {batteryLvl}{batteryLvl !== "--" ? "%" : ""}</span>
+              {/* Only renders battery component if the device actually supports the API */}
+              {batteryLvl !== null && (
+                <span className="text-emerald-400 flex items-center gap-1"><Battery size={14}/> {batteryLvl}%</span>
+              )}
             </div>
           </div>
           <div className="flex-1 flex flex-col gap-4">
