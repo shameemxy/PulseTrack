@@ -55,7 +55,6 @@ export default function VictimUI() {
   useEffect(() => { motionThreshRef.current = motionThreshold; }, [motionThreshold]);
   useEffect(() => { audioThreshRef.current = audioThreshold; }, [audioThreshold]);
 
-  // Live ECG Waveform Animation Loop
   useEffect(() => {
     const interval = setInterval(() => {
       const mVal = currentMotionRef.current;
@@ -70,10 +69,8 @@ export default function VictimUI() {
     return () => clearInterval(interval);
   }, []);
 
-  // FIXED: Independent Main Countdown Timer
   useEffect(() => {
     if (isBlackout || falseAlarmTimer !== null) return;
-    
     const mainTimer = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
@@ -84,14 +81,11 @@ export default function VictimUI() {
         return prev - 1;
       });
     }, 1000);
-    
     return () => clearInterval(mainTimer);
   }, [isBlackout, falseAlarmTimer]);
 
-  // FIXED: Independent False Alarm Timer
   useEffect(() => {
     if (falseAlarmTimer === null) return;
-    
     const alarmTimer = setInterval(() => {
       setFalseAlarmTimer((prev) => {
         if (prev <= 1) {
@@ -102,14 +96,11 @@ export default function VictimUI() {
         return prev - 1;
       });
     }, 1000);
-
     return () => clearInterval(alarmTimer);
   }, [falseAlarmTimer]);
 
   useEffect(() => {
-    if (navigator.getBattery) {
-      navigator.getBattery().then(b => setBatteryLvl(Math.round(b.level * 100)));
-    }
+    if (navigator.getBattery) navigator.getBattery().then(b => setBatteryLvl(Math.round(b.level * 100)));
     if (navigator.connection) setNetworkType(navigator.connection.effectiveType);
     window.addEventListener('online', () => setIsOnline(true));
     window.addEventListener('offline', () => setIsOnline(false));
@@ -119,18 +110,15 @@ export default function VictimUI() {
       (err) => console.warn("GPS Warning:", err), 
       { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
     );
-
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
   const handleMotion = (event) => {
     if (isTrappedRef.current) return;
-
     const acc = event.acceleration || event.accelerationIncludingGravity;
     if (!acc || acc.x === null) return;
 
     const { x, y, z } = acc;
-
     if (lastAccRef.current.x === null) {
         lastAccRef.current = { x, y, z };
         return;
@@ -181,7 +169,7 @@ export default function VictimUI() {
 
       if (videoRef.current) { 
         videoRef.current.srcObject = stream; 
-        videoRef.current.play(); 
+        videoRef.current.play().catch(e => console.warn("Video play error:", e)); 
       }
       
       mediaRecorderRef.current = new MediaRecorder(stream);
@@ -229,7 +217,6 @@ export default function VictimUI() {
 
   const triggerFalseAlarm = () => {
     if (isFalseAlarmRef.current || isTrappedRef.current || !sensorsActiveRef.current) return;
-    
     isFalseAlarmRef.current = true;
     setFalseAlarmTimer(15);
     
@@ -278,16 +265,32 @@ export default function VictimUI() {
     const isLowBandwidth = networkType === '2g' || networkType === 'slow-2g' || !isOnline;
     let photoData = "";
     
-    if (!isLowBandwidth && videoRef.current) {
+    // FIX: A bulletproof check to ensure the video has actually loaded frames before capturing
+    if (!isLowBandwidth && videoRef.current && videoRef.current.srcObject) {
       try {
-        if (videoRef.current.readyState >= 2) {
-          const canvas = document.createElement("canvas");
-          canvas.width = 480; 
-          canvas.height = 640;
-          canvas.getContext('2d').drawImage(videoRef.current, 0, 0, 480, 640);
-          photoData = canvas.toDataURL('image/jpeg', 0.6); 
+        const video = videoRef.current;
+        
+        // readyState 2 (HAVE_CURRENT_DATA) or higher means a frame is available to draw
+        if (video.readyState >= 2) {
+            const canvas = document.createElement("canvas");
+            canvas.width = video.videoWidth || 480; 
+            canvas.height = video.videoHeight || 640;
+            
+            if (canvas.width > 0 && canvas.height > 0) {
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const base64Str = canvas.toDataURL('image/jpeg', 0.5); // 0.5 quality for speed
+                
+                // A genuine base64 image string is usually thousands of characters long. 
+                // If it's short, it captured an empty/corrupted frame.
+                if (base64Str.length > 500) {
+                    photoData = base64Str;
+                }
+            }
         }
-      } catch (err) {}
+      } catch (err) {
+        console.warn("Canvas drawing failed:", err);
+      }
     }
 
     isTrappedRef.current = true;
@@ -309,22 +312,25 @@ export default function VictimUI() {
 
     const finalAudioBase64 = isLowBandwidth ? "" : await getProcessedAudio();
 
+    const payload = { 
+        victimName: deviceId,
+        status: "TRAPPED", 
+        lat: locationRef.current.lat, 
+        lng: locationRef.current.lng,
+        battery: batteryLvl,
+        packetType: isLowBandwidth ? "LOW_BANDWIDTH" : "HIGH_BANDWIDTH",
+        timestamp: Date.now(),
+        aiTriage: "Pending...",
+        transcript: transcriptRef.current || "No words captured.",
+        audioDB: audioDB.toFixed(1),
+        motionMS2: motionMS2.toFixed(2)
+    };
+
+    if (photoData) payload.photoBase64 = photoData;
+    if (finalAudioBase64) payload.audioRecordBase64 = finalAudioBase64;
+
     try {
-        await setDoc(doc(db, "victims", deviceId), { 
-            victimName: deviceId,
-            status: "TRAPPED", 
-            lat: locationRef.current.lat, 
-            lng: locationRef.current.lng,
-            battery: batteryLvl,
-            packetType: isLowBandwidth ? "LOW_BANDWIDTH" : "HIGH_BANDWIDTH",
-            timestamp: Date.now(),
-            aiTriage: "Pending...",
-            photoBase64: photoData,
-            audioRecordBase64: finalAudioBase64,
-            transcript: transcriptRef.current || "No words captured.",
-            audioDB: audioDB.toFixed(1),
-            motionMS2: motionMS2.toFixed(2)
-        });
+        await setDoc(doc(db, "victims", deviceId), payload, { merge: true });
     } catch (error) {
         console.error("Firebase Upload Failed:", error);
     }
@@ -351,8 +357,17 @@ export default function VictimUI() {
   );
 
   return (
-    <div className="min-h-screen bg-slate-50 p-6 flex flex-col font-sans text-slate-900">
-      <video ref={videoRef} playsInline autoPlay muted className="hidden" />
+    <div className="min-h-screen bg-slate-50 p-6 flex flex-col font-sans text-slate-900 relative overflow-hidden">
+      
+      {/* FIX: The video is fully present in the DOM (opacity 0.01) to force the browser hardware to process the frames constantly, but it is invisible to the user */}
+      <video 
+        ref={videoRef} 
+        playsInline 
+        autoPlay 
+        muted 
+        onLoadedMetadata={() => videoRef.current?.play().catch(() => {})}
+        style={{ position: 'absolute', width: '10px', height: '10px', opacity: 0.01, pointerEvents: 'none', zIndex: -10 }} 
+      />
       
       <div className="flex justify-between items-center mb-6 pb-4 border-b border-slate-200">
         <div className="flex items-center gap-2">
@@ -370,55 +385,37 @@ export default function VictimUI() {
       </div>
 
       <div className="flex-1 flex flex-col gap-6">
-        
-        {/* Hospital ECG Pulse Spike Monitors */}
         <div className="grid grid-cols-2 gap-4">
-          
-          {/* Motion ECG Monitor */}
           <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md flex flex-col gap-3">
             <div className="flex justify-between items-center text-slate-400">
                 <div className="flex items-center gap-1.5 text-blue-400"><Activity size={14} strokeWidth={2.5}/> <span className="text-[10px] font-bold tracking-widest uppercase">Motion Pulse</span></div>
                 <div className="flex items-baseline gap-1"><span className="font-mono text-xl font-bold text-white tracking-tight">{motionMS2.toFixed(1)}</span><span className="text-[10px] text-slate-400 font-medium">m/s²</span></div>
             </div>
-            
             <div className="w-full h-14 bg-black rounded-lg border border-slate-800 overflow-hidden relative flex items-center shadow-inner">
                 <div className="absolute inset-0 bg-[linear-gradient(to_right,#1e293b_1px,transparent_1px),linear-gradient(to_bottom,#1e293b_1px,transparent_1px)] bg-[size:14px_14px] opacity-40"></div>
-                
                 <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="w-full h-full relative z-10">
-                    <polyline 
-                        points={motionHistory.map((val, i) => `${(i / (motionHistory.length - 1)) * 100},${val}`).join(" ")} 
-                        fill="none" stroke="#38bdf8" strokeWidth="2.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" 
-                    />
+                    <polyline points={motionHistory.map((val, i) => `${(i / (motionHistory.length - 1)) * 100},${val}`).join(" ")} fill="none" stroke="#38bdf8" strokeWidth="2.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
                 </svg>
             </div>
           </div>
-          
-          {/* Audio ECG Monitor */}
           <div className="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md flex flex-col gap-3">
             <div className="flex justify-between items-center text-slate-400">
                 <div className="flex items-center gap-1.5 text-red-400"><Mic size={14} strokeWidth={2.5}/> <span className="text-[10px] font-bold tracking-widest uppercase">Audio Pulse</span></div>
                 <div className="flex items-baseline gap-1"><span className="font-mono text-xl font-bold text-white tracking-tight">{audioDB.toFixed(0)}</span><span className="text-[10px] text-slate-400 font-medium">dB</span></div>
             </div>
-            
             <div className="w-full h-14 bg-black rounded-lg border border-slate-800 overflow-hidden relative flex items-center shadow-inner">
                 <div className="absolute inset-0 bg-[linear-gradient(to_right,#1e293b_1px,transparent_1px),linear-gradient(to_bottom,#1e293b_1px,transparent_1px)] bg-[size:14px_14px] opacity-40"></div>
-                
                 <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="w-full h-full relative z-10">
-                    <polyline 
-                        points={audioHistory.map((val, i) => `${(i / (audioHistory.length - 1)) * 100},${val}`).join(" ")} 
-                        fill="none" stroke="#f87171" strokeWidth="2.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" 
-                    />
+                    <polyline points={audioHistory.map((val, i) => `${(i / (audioHistory.length - 1)) * 100},${val}`).join(" ")} fill="none" stroke="#f87171" strokeWidth="2.5" vectorEffect="non-scaling-stroke" strokeLinejoin="round" />
                 </svg>
             </div>
           </div>
-
         </div>
 
         <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col gap-4">
             <div className="flex items-center gap-2 text-slate-800 font-semibold text-sm border-b border-slate-100 pb-2">
                 <Settings2 size={16}/> Configuration
             </div>
-            
             <div className="flex justify-between items-center">
                 <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Motion Trigger</span>
                 <div className="flex items-center bg-slate-100 p-1 rounded-lg border border-slate-200">
@@ -427,7 +424,6 @@ export default function VictimUI() {
                     <button onClick={() => setMotionThreshold(p => Math.min(50, p + 1))} className="p-1.5 hover:bg-white rounded-md text-slate-600 shadow-sm transition"><Plus size={14}/></button>
                 </div>
             </div>
-            
             <div className="flex justify-between items-center">
                 <span className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Audio Trigger</span>
                 <div className="flex items-center bg-slate-100 p-1 rounded-lg border border-slate-200">
@@ -454,7 +450,6 @@ export default function VictimUI() {
         <div className="text-5xl font-extrabold text-slate-800 mb-6 tabular-nums tracking-tighter">
             {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
         </div>
-        
         <div className="w-full flex gap-3">
           <button onClick={() => navigate('/safe')} className="flex-1 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 p-4 rounded-xl flex flex-col items-center gap-2 shadow-sm transition">
             <CheckCircle size={22} strokeWidth={2}/>
