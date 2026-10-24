@@ -25,7 +25,8 @@ export default function VictimUI() {
   const [falseAlarmTimer, setFalseAlarmTimer] = useState(null);
   const [sensorsActive, setSensorsActive] = useState(false);
   
-  const [batteryLvl, setBatteryLvl] = useState(100);
+  // Default to "--" for iPhones since Apple blocks the Battery API
+  const [batteryLvl, setBatteryLvl] = useState("--");
   const [networkType, setNetworkType] = useState('4g');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
 
@@ -42,8 +43,6 @@ export default function VictimUI() {
   const audioChunksRef = useRef([]);
   const recognitionRef = useRef(null);
   const transcriptRef = useRef("");
-  
-  // Warmed-up Audio Context for bypassing autoplay policies
   const audioCtxRef = useRef(null);
 
   useEffect(() => { motionThreshRef.current = motionThreshold; }, [motionThreshold]);
@@ -59,7 +58,9 @@ export default function VictimUI() {
   }, [timeLeft, isBlackout, falseAlarmTimer]);
 
   useEffect(() => {
-    if (navigator.getBattery) navigator.getBattery().then(b => setBatteryLvl(Math.round(b.level * 100)));
+    if (navigator.getBattery) {
+      navigator.getBattery().then(b => setBatteryLvl(Math.round(b.level * 100)));
+    }
     if (navigator.connection) setNetworkType(navigator.connection.effectiveType);
     window.addEventListener('online', () => setIsOnline(true));
     window.addEventListener('offline', () => setIsOnline(false));
@@ -85,16 +86,31 @@ export default function VictimUI() {
   };
 
   const enableSensors = async () => {
-    // 1. Warm up the audio engine on user click so we can beep later
+    // 1. CRITICAL iOS FIX: Ask for motion IMMEDIATELY on click before awaiting camera
+    let motionGranted = false;
+    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+      try {
+        const p = await DeviceMotionEvent.requestPermission();
+        if (p === 'granted') motionGranted = true;
+      } catch (err) { console.warn("Motion permission denied", err); }
+    } else {
+      motionGranted = true; // Android allows it by default
+    }
+
+    if (motionGranted) {
+      window.addEventListener('devicemotion', handleMotion);
+    }
+
+    // 2. Warm up audio context
     const AudioContext = window.AudioContext || window.webkitAudioContext;
     audioCtxRef.current = new AudioContext();
     audioCtxRef.current.resume();
 
-    // 2. Request BACK camera specifically
+    // 3. Now request the Camera and Microphone
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: true, 
-        video: { facingMode: { ideal: "environment" } } // Prioritize back camera
+        video: { facingMode: { ideal: "environment" } } 
       });
 
       if (videoRef.current) { 
@@ -138,16 +154,11 @@ export default function VictimUI() {
           transcriptRef.current += final + " ";
         };
       }
-
+      
       setSensorsActive(true);
-      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-        const p = await DeviceMotionEvent.requestPermission();
-        if (p === 'granted') window.addEventListener('devicemotion', handleMotion);
-      } else { 
-        window.addEventListener('devicemotion', handleMotion); 
-      }
     } catch (err) {
-      console.error("Sensor initialization failed:", err);
+      console.error("Camera/Mic initialization failed:", err);
+      setSensorsActive(true); // Still activate UI so user knows system tried
     }
   };
 
@@ -189,8 +200,6 @@ export default function VictimUI() {
       mediaRecorderRef.current.onstop = () => {
         clearTimeout(safetyTimer);
         if (audioChunksRef.current.length === 0) return resolve("");
-        
-        // Dynamically use the OS preferred MIME type to fix iOS silence bug
         const mimeType = mediaRecorderRef.current.mimeType || 'audio/webm';
         const blob = new Blob(audioChunksRef.current, { type: mimeType });
         const reader = new FileReader();
@@ -216,13 +225,12 @@ export default function VictimUI() {
       try {
         if (videoRef.current.readyState >= 2) {
           const canvas = document.createElement("canvas");
-          // Fetch exact natural resolution of the camera stream
           const vw = videoRef.current.videoWidth;
           const vh = videoRef.current.videoHeight;
           canvas.width = vw;
           canvas.height = vh;
           canvas.getContext('2d').drawImage(videoRef.current, 0, 0, vw, vh);
-          photoData = canvas.toDataURL('image/jpeg', 0.6); // Slightly higher quality
+          photoData = canvas.toDataURL('image/jpeg', 0.6); 
         }
       } catch (err) {}
     }
@@ -232,7 +240,6 @@ export default function VictimUI() {
     setIsBlackout(true);
     setFalseAlarmTimer(null);
 
-    // BEEP LOGIC: Now uses the pre-warmed audio context, allowing it to bypass auto-play rules!
     try {
         if (!audioCtxRef.current) {
             audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
@@ -295,7 +302,7 @@ export default function VictimUI() {
               <span className={`flex items-center gap-1 ${isOnline ? 'text-emerald-400' : 'text-red-400'}`}>
                 {isOnline ? <Wifi size={14}/> : <WifiOff size={14}/>} {networkType.toUpperCase()}
               </span>
-              <span className="text-emerald-400 flex items-center gap-1"><Battery size={14}/> {batteryLvl}%</span>
+              <span className="text-emerald-400 flex items-center gap-1"><Battery size={14}/> {batteryLvl}{batteryLvl !== "--" ? "%" : ""}</span>
             </div>
           </div>
           <div className="flex-1 flex flex-col gap-4">
