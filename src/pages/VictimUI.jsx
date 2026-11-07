@@ -154,47 +154,57 @@ export default function VictimUI() {
         peakMotionRef.current = movement;
     }
     
-    // Only trigger if we aren't already paused
     if (movement > motionThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current && !isAutoDeployPaused && !showPauseModal) {
       triggerFalseAlarm();
     }
   };
 
-  // FIX: Hardware permissions MUST be requested synchronously directly inside the click event.
+  // -------------------------------------------------------------------------
+  // THE FIX: Simultaneous hardware requests via Promise.all
+  // -------------------------------------------------------------------------
   const handleStartSequence = async () => {
     try {
-      let motionGranted = false;
-      
-      // 1. Synchronous Motion Request
-      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-        const p = await DeviceMotionEvent.requestPermission();
-        if (p === 'granted') motionGranted = true;
-      } else {
-        motionGranted = true; 
-      }
-
-      // 2. Synchronous Audio Context Wakeup
+      // 1. Wake Audio Context synchronously
       if (!audioCtxRef.current) {
           audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
       }
       if (audioCtxRef.current.state === 'suspended') {
-          await audioCtxRef.current.resume();
+          audioCtxRef.current.resume();
       }
 
-      // 3. Synchronous Camera/Mic Request
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: true, 
-        video: { facingMode: { ideal: "environment" } } 
+      // 2. Fire Motion and Camera requests simultaneously. 
+      // This prevents the browser from dropping the click gesture token.
+      const motionPromise = (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function')
+          ? DeviceMotionEvent.requestPermission().catch(() => 'denied')
+          : Promise.resolve('granted');
+
+      const mediaPromise = navigator.mediaDevices.getUserMedia({ 
+          audio: true, 
+          video: { facingMode: { ideal: "environment" } } 
+      }).catch(err => {
+          console.error("Media permission denied", err);
+          return null;
       });
 
+      // Await them together. The OS will automatically queue the native popups back-to-back.
+      const [motionStatus, stream] = await Promise.all([motionPromise, mediaPromise]);
+
+      if (!stream) {
+          alert("Camera and Microphone access is strictly required for emergency telemetry.");
+          return;
+      }
+
+      const motionGranted = motionStatus === 'granted';
+
+      // 3. Attach Media Streams
       if (videoRef.current) { 
-        videoRef.current.srcObject = stream; 
-        await videoRef.current.play().catch(e => console.warn("Video play error:", e)); 
+          videoRef.current.srcObject = stream; 
+          videoRef.current.play().catch(e => console.warn("Video play error:", e)); 
       }
       
       mediaRecorderRef.current = new MediaRecorder(stream);
       mediaRecorderRef.current.ondataavailable = (e) => { 
-        if (e.data.size > 0) audioChunksRef.current.push(e.data); 
+          if (e.data.size > 0) audioChunksRef.current.push(e.data); 
       };
 
       const analyser = audioCtxRef.current.createAnalyser();
@@ -203,46 +213,46 @@ export default function VictimUI() {
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
       
       const updateAudio = () => {
-        analyser.getByteFrequencyData(dataArray);
-        const avg = dataArray.reduce((a, b) => a + b) / dataArray.length;
-        const currentDB = Math.max(0, (avg / 255) * 120);
-        
-        currentAudioRef.current = currentDB;
-        setAudioDB(currentDB);
+          analyser.getByteFrequencyData(dataArray);
+          const avg = dataArray.reduce((a, b) => a + b) / dataArray.length;
+          const currentDB = Math.max(0, (avg / 255) * 120);
+          
+          currentAudioRef.current = currentDB;
+          setAudioDB(currentDB);
 
-        if (isFalseAlarmRef.current && currentDB > peakAudioRef.current) {
-            peakAudioRef.current = currentDB;
-        }
-        
-        if (currentDB > audioThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current && !isAutoDeployPaused && !showPauseModal) {
-          triggerFalseAlarm();
-        }
-        requestAnimationFrame(updateAudio);
+          if (isFalseAlarmRef.current && currentDB > peakAudioRef.current) {
+              peakAudioRef.current = currentDB;
+          }
+          
+          if (currentDB > audioThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current && !isAutoDeployPaused && !showPauseModal) {
+              triggerFalseAlarm();
+          }
+          requestAnimationFrame(updateAudio);
       };
       updateAudio();
 
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (SpeechRecognition) {
-        recognitionRef.current = new SpeechRecognition();
-        recognitionRef.current.continuous = true;
-        recognitionRef.current.interimResults = true;
-        recognitionRef.current.onresult = (e) => {
-          let final = "";
-          for (let i = e.resultIndex; i < e.results.length; ++i) {
-            if (e.results[i].isFinal) final += e.results[i][0].transcript;
-          }
-          transcriptRef.current += final + " ";
-        };
+          recognitionRef.current = new SpeechRecognition();
+          recognitionRef.current.continuous = true;
+          recognitionRef.current.interimResults = true;
+          recognitionRef.current.onresult = (e) => {
+              let final = "";
+              for (let i = e.resultIndex; i < e.results.length; ++i) {
+                  if (e.results[i].isFinal) final += e.results[i][0].transcript;
+              }
+              transcriptRef.current += final + " ";
+          };
       }
 
       // 4. Activate Listeners
       if (motionGranted) {
-        window.addEventListener('devicemotion', handleMotion);
+          window.addEventListener('devicemotion', handleMotion);
       }
       sensorsActiveRef.current = true;
       setSensorsActive(true);
 
-      // 5. Visual Fade Transition (Only triggers AFTER permissions are granted)
+      // 5. Trigger Visual Fade
       setIsFading(true);
       setTimeout(() => {
           setIsInitialized(true);
@@ -251,9 +261,10 @@ export default function VictimUI() {
 
     } catch (err) {
       console.error("Hardware initialization failed:", err);
-      alert("Permission denied or Hardware unavailable. Are you running this on a secure HTTPS connection?");
+      alert("Permission denied or Hardware unavailable.");
     }
   };
+  // -------------------------------------------------------------------------
 
   const triggerFalseAlarm = () => {
     if (isFalseAlarmRef.current || isTrappedRef.current || !sensorsActiveRef.current) return;
@@ -400,7 +411,6 @@ export default function VictimUI() {
   // -------------------------
   return (
     <>
-      {/* FIX: Video Element is ALWAYS mounted at the root DOM level. It is never destroyed during screen swaps. */}
       <video 
         ref={videoRef} 
         playsInline 
@@ -504,7 +514,6 @@ export default function VictimUI() {
         <div className={`min-h-screen bg-[#FAFAFA] p-4 sm:p-6 flex flex-col transition-opacity duration-700 ${isFading ? 'opacity-0' : 'opacity-100'} relative antialiased`} style={{ fontFamily: "'Inter', sans-serif" }}>
           <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');`}</style>
           
-          {/* 300s Timer Pause Confirmation Modal */}
           {showPauseModal && (
               <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 bg-[#000000]/20 backdrop-blur-sm">
                   <div className="bg-white rounded-[24px] p-6 sm:p-8 shadow-[0_16px_40px_rgba(0,0,0,0.12)] w-full max-w-sm border border-black/[0.04]">
@@ -530,7 +539,6 @@ export default function VictimUI() {
               </div>
           )}
           
-          {/* Header */}
           <div className="flex justify-between items-center mb-6 sm:mb-8">
             <div className="flex items-center gap-2">
                 <div className="w-8 h-8 bg-[#171717] rounded-lg flex items-center justify-center shadow-sm">
@@ -550,7 +558,6 @@ export default function VictimUI() {
 
           <div className="flex-1 flex flex-col gap-4 sm:gap-6">
             
-            {/* Main Auto-Deploy Timer Card */}
             <div className="bg-white p-6 sm:p-8 rounded-[24px] shadow-[0_2px_8px_rgba(0,0,0,0.04),0_16px_24px_rgba(0,0,0,0.02)] border border-black/[0.06] flex flex-col items-center justify-center relative">
                 <div className="absolute top-4 sm:top-5 left-4 sm:left-5 flex items-center gap-2">
                     {isAutoDeployPaused ? (
@@ -598,7 +605,6 @@ export default function VictimUI() {
                 </div>
             </div>
 
-            {/* Grid Layout (min-w-0 stops flexbox from overflowing offscreen on tiny mobiles) */}
             <div className="grid grid-cols-2 gap-3 sm:gap-4 w-full">
               <div className="bg-white p-4 sm:p-5 rounded-[24px] shadow-[0_2px_8px_rgba(0,0,0,0.04),0_16px_24px_rgba(0,0,0,0.02)] border border-black/[0.06] flex flex-col justify-between overflow-hidden relative min-w-0">
                 <div className="flex items-center gap-1.5 sm:gap-2 text-[#737373] relative z-10">
@@ -629,12 +635,10 @@ export default function VictimUI() {
               </div>
             </div>
 
-            {/* Configuration Module */}
             <div className="bg-white p-5 sm:p-6 rounded-[24px] shadow-[0_2px_8px_rgba(0,0,0,0.04),0_16px_24px_rgba(0,0,0,0.02)] border border-black/[0.06] flex flex-col gap-4 sm:gap-5">
                 <div className="flex items-center gap-2 text-[#171717] font-medium text-sm border-b border-black/[0.06] pb-3">
                     <Settings2 size={16}/> Threshold Settings
                 </div>
-                
                 <div className="flex justify-between items-center">
                     <span className="text-[10px] sm:text-[11px] font-semibold text-[#737373] uppercase tracking-widest">Motion Trigger</span>
                     <div className="flex items-center bg-[#F5F5F5] p-1 rounded-full">
@@ -643,7 +647,6 @@ export default function VictimUI() {
                         <button onClick={() => setMotionThreshold(p => Math.min(50, p + 1))} className="p-2 hover:bg-white rounded-full text-[#737373] transition-colors"><Plus size={14}/></button>
                     </div>
                 </div>
-                
                 <div className="flex justify-between items-center">
                     <span className="text-[10px] sm:text-[11px] font-semibold text-[#737373] uppercase tracking-widest">Audio Trigger</span>
                     <div className="flex items-center bg-[#F5F5F5] p-1 rounded-full">
@@ -656,7 +659,6 @@ export default function VictimUI() {
 
           </div>
           
-          {/* Sticky Bottom SOS Action */}
           <div className="mt-6 sm:mt-8 flex justify-center pb-2">
             <button 
                 onClick={() => handleTrapped(false)} 
