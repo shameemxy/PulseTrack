@@ -4,7 +4,15 @@ import { db } from '../firebase';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { Target, MapPin, Battery, Navigation, Play, Clock, Wifi, Camera, MessageSquare, CheckCircle2, Clock3 } from 'lucide-react';
+import { Target, MapPin, Navigation, Clock, MessageSquare, CheckCircle2, Clock3, AlertTriangle } from 'lucide-react';
+
+// Bypass Leaflet tracking prevention blockers
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://unpkg.com/leaflet@1.7.1/dist/images/marker-icon-2x.png',
+  iconUrl: 'https://unpkg.com/leaflet@1.7.1/dist/images/marker-icon.png',
+  shadowUrl: 'https://unpkg.com/leaflet@1.7.1/dist/images/marker-shadow.png',
+});
 
 const victimIcon = new L.Icon({
   iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
@@ -42,7 +50,6 @@ export default function RescueTeam() {
     };
   }, []);
 
-  // Update status to RESCUED_PENDING
   const handleMarkRescued = async (id) => {
     try {
       await updateDoc(doc(db, "victims", id), { status: "RESCUED_PENDING" });
@@ -51,7 +58,6 @@ export default function RescueTeam() {
     }
   };
 
-  // Update status back to TRAPPED / In Progress
   const handleMarkInProgress = async (id) => {
     try {
       await updateDoc(doc(db, "victims", id), { status: "TRAPPED" });
@@ -61,26 +67,29 @@ export default function RescueTeam() {
   };
 
   return (
-    <div className="h-screen bg-slate-50 p-4 font-sans text-slate-900 flex flex-col overflow-hidden">
+    <div className="h-screen bg-[#FAFAFA] p-4 md:p-6 font-['Inter',sans-serif] antialiased text-[#171717] flex flex-col overflow-hidden max-w-2xl mx-auto w-full">
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');`}</style>
       
       {/* Tactical Header */}
-      <div className="flex items-center justify-between bg-white border border-slate-200 p-3 rounded-xl shadow-sm mb-4 flex-none">
+      <div className="flex items-center justify-between bg-white border border-black/[0.04] px-5 py-4 rounded-[24px] shadow-[0_2px_8px_rgba(0,0,0,0.04),0_16px_24px_rgba(0,0,0,0.02)] mb-5 flex-none z-10">
         <div className="flex items-center gap-3">
-          <img src="/logo-transparent.png" alt="Logo" className="w-7 h-7 object-contain" onError={(e) => e.target.style.display='none'} />
+          <div className="w-10 h-10 bg-[#171717] rounded-xl flex items-center justify-center shadow-sm">
+              <Target size={20} className="text-white" strokeWidth={2}/>
+          </div>
           <div>
-            <h1 className="text-base font-bold tracking-tight text-slate-800">Rescue Terminal</h1>
-            <div className="text-[10px] text-blue-600 font-bold tracking-widest uppercase flex items-center gap-1">
-                <Target size={10}/> Active Unit Tracking
+            <h1 className="text-base font-semibold tracking-tight text-[#171717]">Rescue Terminal</h1>
+            <div className="text-[10px] text-blue-600 font-bold tracking-widest uppercase mt-0.5">
+                Alpha Unit Field Ops
             </div>
           </div>
         </div>
-        <div className="bg-red-50 px-3 py-1.5 rounded border border-red-200 font-bold flex items-center gap-1.5 text-xs text-red-700 shadow-sm">
-            {targets.length} TARGETS
+        <div className="bg-red-50 px-3.5 py-2 rounded-lg font-bold flex items-center gap-1.5 text-[11px] uppercase tracking-widest text-red-700 shadow-sm border border-red-100">
+            {targets.length} Targets
         </div>
       </div>
       
-      {/* Map */}
-      <div className="h-48 md:h-64 rounded-xl overflow-hidden border border-slate-200 shadow-sm mb-4 relative z-0 flex-none bg-white">
+      {/* Map Module */}
+      <div className="h-56 md:h-72 rounded-[24px] overflow-hidden border border-black/[0.06] shadow-[0_2px_8px_rgba(0,0,0,0.04),0_16px_24px_rgba(0,0,0,0.02)] mb-6 relative z-0 flex-none bg-white">
         <MapContainer center={rescuerLocation ? [rescuerLocation.lat, rescuerLocation.lng] : [12.9525, 74.8806]} zoom={13} style={{ height: '100%', width: '100%' }}>
           <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
           
@@ -88,8 +97,8 @@ export default function RescueTeam() {
             user.lat && user.lng && user.status === "TRAPPED" ? (
               <Marker key={user.id} position={[user.lat, user.lng]} icon={victimIcon}>
                 <Popup className="font-sans">
-                  <b className="text-red-600 text-sm">{user.victimName || user.id}</b><br/>
-                  <span className="text-xs text-slate-600 font-medium">Requires Extraction</span>
+                  <b className="text-red-600 text-sm block mb-1">{user.victimName || user.id}</b>
+                  <span className="text-[#737373] text-[11px] font-semibold uppercase tracking-widest">Requires Extraction</span>
                 </Popup>
               </Marker>
             ) : null
@@ -97,87 +106,92 @@ export default function RescueTeam() {
 
           {rescuerLocation && (
             <Marker position={[rescuerLocation.lat, rescuerLocation.lng]} icon={rescuerIcon}>
-              <Popup className="font-sans"><b className="text-blue-600">Alpha Unit</b><br/><span className="text-xs">Your Location</span></Popup>
+              <Popup className="font-sans"><b className="text-blue-600 block mb-1">Alpha Unit</b><span className="text-[#737373] text-[11px] font-semibold uppercase tracking-widest">Your Location</span></Popup>
             </Marker>
           )}
         </MapContainer>
       </div>
 
-      <div className="flex items-center gap-2 text-xs font-bold text-slate-500 mb-2 px-1 uppercase tracking-wider flex-none">
-        <Navigation size={14} className="text-blue-600"/> Active Extractions
+      <div className="flex items-center gap-2 text-[11px] font-semibold text-[#737373] mb-3 px-2 uppercase tracking-widest flex-none">
+        <Navigation size={14} className="text-[#171717]"/> Active Extractions
       </div>
 
       {/* Scrollable Target List */}
-      <div className="flex-1 overflow-y-auto flex flex-col gap-4 pb-6 scroll-smooth">
+      <div className="flex-1 overflow-y-auto flex flex-col gap-4 pb-10 scroll-smooth px-1">
         {targets.map(target => {
           const isPending = target.status === "RESCUED_PENDING";
 
           return (
-            <div key={target.id} className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col gap-3 shadow-sm relative overflow-hidden flex-none">
+            <div key={target.id} className={`bg-white border p-5 rounded-[24px] shadow-[0_2px_8px_rgba(0,0,0,0.04),0_16px_24px_rgba(0,0,0,0.02)] flex flex-col gap-3 relative overflow-hidden flex-none ${isPending ? 'border-amber-200' : 'border-black/[0.06]'}`}>
               
+              {/* Status Ribbon */}
               <div className={`absolute top-0 left-0 w-1.5 h-full ${isPending ? 'bg-amber-500' : 'bg-red-500'}`}></div>
 
-              <div className="flex justify-between items-start pl-2">
+              <div className="flex justify-between items-start pl-2 border-b border-black/[0.04] pb-3">
                 <div>
-                    <span className="font-bold text-slate-800 text-sm">{target.victimName || target.id}</span>
-                    <div className="text-slate-500 text-[10px] flex items-center gap-1 mt-1 font-mono">
-                        <Clock size={10}/> {target.timestamp ? new Date(target.timestamp).toLocaleTimeString() : "Time Unknown"}
+                    <span className="font-semibold text-sm text-[#171717]">{target.victimName || target.id}</span>
+                    <div className="text-[#737373] text-[11px] flex items-center gap-1.5 mt-1 font-medium">
+                        <Clock size={12}/> {target.timestamp ? new Date(target.timestamp).toLocaleTimeString() : "Time Unknown"}
                     </div>
                 </div>
                 <div className="flex flex-col items-end gap-1">
                     {isPending ? (
-                      <span className="bg-amber-100 text-amber-800 border border-amber-200 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                        <Clock3 size={10}/> Awaiting Confirmation
+                      <span className="bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-bold px-2.5 py-1 rounded-md flex items-center gap-1 uppercase tracking-widest">
+                        <Clock3 size={12}/> Awaiting Command
                       </span>
                     ) : (
-                      <span className="bg-red-100 text-red-800 border border-red-200 text-[10px] font-bold px-2 py-0.5 rounded-full">
-                        TRAPPED
+                      <span className="bg-red-50 text-red-700 border border-red-200 text-[10px] font-bold px-2.5 py-1 rounded-md uppercase tracking-widest flex items-center gap-1">
+                        <AlertTriangle size={12}/> Trapped
                       </span>
                     )}
                 </div>
               </div>
 
-              <div className="ml-2 bg-slate-50 p-2.5 rounded-md border border-slate-100">
-                  <div className="text-[10px] text-blue-600 font-bold mb-1 flex items-center gap-1"><MessageSquare size={12}/> CCAI ASSESSMENT</div>
-                  <p className="text-xs font-medium leading-relaxed text-slate-700">
+              {/* CCAI Assessment Bubble */}
+              <div className="ml-2 bg-[#FAFAFA] p-3.5 rounded-[16px] border border-black/[0.04] mt-1">
+                  <div className="text-[10px] text-[#171717] font-semibold mb-2 flex items-center gap-1.5 uppercase tracking-widest">
+                      <MessageSquare size={14}/> CCAI Intelligence
+                  </div>
+                  <p className="text-[13px] font-medium leading-relaxed text-[#404040]">
                       {target.aiTriage || "Assessment Pending..."}
                   </p>
               </div>
 
-              <div className="flex flex-col gap-2 ml-2">
+              {/* Media Block */}
+              <div className="flex flex-col gap-3 ml-2 mt-1">
                 {target.audioRecordBase64 && (
-                    <audio controls src={target.audioRecordBase64} className="w-full h-8" />
+                    <audio controls src={target.audioRecordBase64} className="w-full h-10 outline-none" />
                 )}
                 {target.photoBase64 && (
-                    <img src={target.photoBase64} alt="incident" className="w-full h-32 object-cover rounded border border-slate-200" />
+                    <img src={target.photoBase64} alt="incident" className="w-full h-40 object-cover rounded-[16px] border border-black/[0.06] shadow-sm" />
                 )}
               </div>
 
               {/* ACTION BUTTONS */}
-              <div className="ml-2 mt-2 flex flex-col gap-2">
+              <div className="ml-2 mt-4 flex flex-col gap-3">
                 <a 
                   href={`https://www.google.com/maps/dir/?api=1&destination=${target.lat},${target.lng}`} 
                   target="_blank" rel="noreferrer"
-                  className="block text-center w-full bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold py-3 rounded-lg transition shadow-md flex justify-center items-center gap-2"
+                  className="block text-center w-full bg-[#171717] hover:bg-black text-white text-[13px] font-medium py-3.5 rounded-[16px] transition-all shadow-[0_4px_12px_rgba(0,0,0,0.1)] flex justify-center items-center gap-2"
                 >
-                  <MapPin size={14}/> Route to Extraction Point
+                  <MapPin size={16}/> Route to Extraction Point
                 </a>
 
-                <div className="flex gap-2">
+                <div className="flex gap-3">
                   <button 
                     onClick={() => handleMarkInProgress(target.id)}
-                    className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold py-2.5 rounded-lg border border-slate-300 transition"
+                    className="flex-1 bg-[#F5F5F5] hover:bg-[#E5E5E5] text-[#171717] text-[13px] font-medium py-3 rounded-[16px] transition-colors"
                   >
                     In Progress
                   </button>
                   <button 
                     onClick={() => handleMarkRescued(target.id)}
                     disabled={isPending}
-                    className={`flex-1 text-xs font-bold py-2.5 rounded-lg shadow-sm transition flex items-center justify-center gap-1.5 ${
-                      isPending ? 'bg-amber-100 text-amber-700 border border-amber-300 cursor-not-allowed' : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                    className={`flex-1 text-[13px] font-medium py-3 rounded-[16px] transition-all flex items-center justify-center gap-1.5 ${
+                      isPending ? 'bg-amber-50 text-amber-700 cursor-not-allowed opacity-70' : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200'
                     }`}
                   >
-                    <CheckCircle2 size={14}/> {isPending ? 'Awaiting Command...' : 'Mark Rescued'}
+                    <CheckCircle2 size={16}/> {isPending ? 'Pending Close...' : 'Mark Rescued'}
                   </button>
                 </div>
               </div>
@@ -186,7 +200,10 @@ export default function RescueTeam() {
           );
         })}
         {targets.length === 0 && (
-          <div className="text-center text-sm text-slate-400 font-medium py-10 bg-white border border-slate-200 rounded-xl">All sectors clear.</div>
+          <div className="flex flex-col items-center justify-center text-center py-16 px-4 opacity-60">
+              <CheckCircle2 size={48} className="text-[#737373] mb-4 stroke-1"/>
+              <p className="text-[15px] font-medium text-[#737373]">All sectors clear.<br/>No extraction targets active.</p>
+          </div>
         )}
       </div>
     </div>
