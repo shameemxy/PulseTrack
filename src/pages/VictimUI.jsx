@@ -1,18 +1,24 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Activity, Mic, ShieldAlert, CheckCircle, XCircle, Battery, Wifi, WifiOff, Pause, Play, AlertTriangle, Settings2, Minus, Plus, MapPin, Camera } from 'lucide-react';
-import { doc, setDoc } from 'firebase/firestore';
-import { db } from '../firebase';
+import { supabase } from '../supabaseClient';
+import { useAuth } from '../context/AuthContext';
 
 export default function VictimUI() {
-  const [deviceId] = useState(() => {
-    let id = localStorage.getItem("pulse_device_id");
-    if (!id) {
-      id = "Victim_" + Math.floor(1000 + Math.random() * 9000);
-      localStorage.setItem("pulse_device_id", id);
+  // ---------------------------------------------------------------------------
+  // AUTH: Sign in anonymously on mount to get a stable Supabase / device ID
+  // ---------------------------------------------------------------------------
+  const { currentUser, isLoading: authLoading, signInAnonymously } = useAuth();
+
+  useEffect(() => {
+    // If no user yet, sign in anonymously. Auth state is managed by AuthContext.
+    if (!authLoading && !currentUser) {
+      signInAnonymously().catch(err => console.error("Anon sign-in failed:", err));
     }
-    return id;
-  });
+  }, [currentUser, authLoading, signInAnonymously]);
+
+  // The deviceId is derived from the Supabase Auth UID or persistent device UUID
+  const deviceId = currentUser?.uid || currentUser?.id || null;
 
   // UI Flow States
   const [isInitialized, setIsInitialized] = useState(false);
@@ -23,6 +29,11 @@ export default function VictimUI() {
   const [timeLeft, setTimeLeft] = useState(300);
   const [isAutoDeployPaused, setIsAutoDeployPaused] = useState(false);
   const [falseAlarmTimer, setFalseAlarmTimer] = useState(null);
+
+  // Logical Incident States
+  const [incidentStatus, setIncidentStatus] = useState("MONITORING"); // MONITORING, TRAPPED, NO_RESPONSE, RESCUED, CANCELLED
+  const [triggerReason, setTriggerReason] = useState(null);
+  const sirenIntervalRef = useRef(null);
 
   // Telemetry States
   const [audioDB, setAudioDB] = useState(0);
@@ -63,8 +74,67 @@ export default function VictimUI() {
   const transcriptRef = useRef("");
   const audioCtxRef = useRef(null);
 
+  // Sync Thresholds
   useEffect(() => { motionThreshRef.current = motionThreshold; }, [motionThreshold]);
   useEffect(() => { audioThreshRef.current = audioThreshold; }, [audioThreshold]);
+
+  // Cleanup Function to prevent memory leaks and zombie microphones
+  const stopSensors = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      videoRef.current.srcObject.getTracks().forEach(t => t.stop());
+      videoRef.current.srcObject = null;
+    }
+    if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+      audioCtxRef.current.close();
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+    try { recognitionRef.current?.stop(); } catch(e) {}
+    window.removeEventListener('devicemotion', handleMotion);
+    setSensorsActive(false);
+    sensorsActiveRef.current = false;
+  };
+
+  // Ensure sensors stop if the user unmounts/navigates away forcefully
+  useEffect(() => {
+    return () => {
+      stopSensors();
+      if (sirenIntervalRef.current) clearInterval(sirenIntervalRef.current);
+    };
+  }, []);
+
+  // Listen to own document for Rescue Signals from Command Center via Supabase Realtime
+  useEffect(() => {
+    if (!deviceId) return;
+    if (incidentStatus === "MONITORING" || incidentStatus === "CANCELLED" || incidentStatus === "SAFE") return;
+    
+    const channel = supabase
+      .channel(`victim_status_${deviceId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'incidents_public',
+          filter: `id=eq.${deviceId}`
+        },
+        (payload) => {
+          const status = payload.new?.status;
+          if (status === "RESCUED_PENDING" || status === "RESOLVED") {
+            setIncidentStatus("RESCUED");
+            setIsBlackout(false);
+            if (sirenIntervalRef.current) clearInterval(sirenIntervalRef.current);
+            stopSensors();
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [incidentStatus, deviceId]);
 
   // Live Graph Animation Loop
   useEffect(() => {
@@ -82,38 +152,40 @@ export default function VictimUI() {
     return () => clearInterval(interval);
   }, [isInitialized]);
 
-  // Main 300s Auto-Deploy Timer (Pausable)
+  // Main 300s Auto-Deploy Timer 
   useEffect(() => {
     if (!isInitialized || isBlackout || falseAlarmTimer !== null || isAutoDeployPaused || showPauseModal) return;
     const mainTimer = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 1) {
-          clearInterval(mainTimer);
-          handleTrapped(true);
-          return 0;
-        }
-        return prev - 1;
-      });
+      setTimeLeft((prev) => Math.max(0, prev - 1));
     }, 1000);
     return () => clearInterval(mainTimer);
   }, [isInitialized, isBlackout, falseAlarmTimer, isAutoDeployPaused, showPauseModal]);
+
+  // Main Timer Timeout Execution
+  useEffect(() => {
+    if (timeLeft === 0 && !isBlackout) {
+      setTriggerReason("AUTO_TIMEOUT");
+      handleTrapped("NO_RESPONSE"); // Tiered Status
+    }
+  }, [timeLeft, isBlackout]);
 
   // Triggered SOS Countdown Timer (15s)
   useEffect(() => {
     if (falseAlarmTimer === null) return;
     const alarmTimer = setInterval(() => {
-      setFalseAlarmTimer((prev) => {
-        if (prev <= 1) {
-          clearInterval(alarmTimer);
-          handleTrapped(true);
-          return 0;
-        }
-        return prev - 1;
-      });
+      setFalseAlarmTimer((prev) => Math.max(0, prev - 1));
     }, 1000);
     return () => clearInterval(alarmTimer);
   }, [falseAlarmTimer]);
 
+  // False Alarm Timeout Execution
+  useEffect(() => {
+    if (falseAlarmTimer === 0 && !isBlackout) {
+      handleTrapped("TRAPPED");
+    }
+  }, [falseAlarmTimer, isBlackout]);
+
+  // Network & Battery Sync
   useEffect(() => {
     if (navigator.getBattery) navigator.getBattery().then(b => setBatteryLvl(Math.round(b.level * 100)));
     if (navigator.connection) setNetworkType(navigator.connection.effectiveType);
@@ -133,20 +205,19 @@ export default function VictimUI() {
     const acc = event.acceleration || event.accelerationIncludingGravity;
     if (!acc || acc.x === null) return;
 
-    const { x, y, z } = acc;
-    if (lastAccRef.current.x === null) {
-        lastAccRef.current = { x, y, z };
-        return;
+    let movement = 0;
+    if (event.acceleration) {
+      const { x, y, z } = acc;
+      if (lastAccRef.current.x !== null) {
+        movement = Math.abs(x - lastAccRef.current.x) + Math.abs(y - lastAccRef.current.y) + Math.abs(z - lastAccRef.current.z);
+      }
+      lastAccRef.current = { x, y, z };
+    } else {
+      const { x, y, z } = acc;
+      movement = Math.abs(Math.sqrt(x*x + y*y + z*z) - 9.8);
     }
 
-    const deltaX = Math.abs(x - lastAccRef.current.x);
-    const deltaY = Math.abs(y - lastAccRef.current.y);
-    const deltaZ = Math.abs(z - lastAccRef.current.z);
-
-    let movement = deltaX + deltaY + deltaZ;
-    lastAccRef.current = { x, y, z };
     if (movement < 0.5) movement = 0;
-
     currentMotionRef.current = movement;
     setMotionMS2(movement);
 
@@ -155,16 +226,13 @@ export default function VictimUI() {
     }
     
     if (movement > motionThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current && !isAutoDeployPaused && !showPauseModal) {
+      setTriggerReason("IMPACT");
       triggerFalseAlarm();
     }
   };
 
-  // -------------------------------------------------------------------------
-  // THE FIX: Simultaneous hardware requests via Promise.all
-  // -------------------------------------------------------------------------
   const handleStartSequence = async () => {
     try {
-      // 1. Wake Audio Context synchronously
       if (!audioCtxRef.current) {
           audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
       }
@@ -172,8 +240,6 @@ export default function VictimUI() {
           audioCtxRef.current.resume();
       }
 
-      // 2. Fire Motion and Camera requests simultaneously. 
-      // This prevents the browser from dropping the click gesture token.
       const motionPromise = (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function')
           ? DeviceMotionEvent.requestPermission().catch(() => 'denied')
           : Promise.resolve('granted');
@@ -186,7 +252,6 @@ export default function VictimUI() {
           return null;
       });
 
-      // Await them together. The OS will automatically queue the native popups back-to-back.
       const [motionStatus, stream] = await Promise.all([motionPromise, mediaPromise]);
 
       if (!stream) {
@@ -196,7 +261,6 @@ export default function VictimUI() {
 
       const motionGranted = motionStatus === 'granted';
 
-      // 3. Attach Media Streams
       if (videoRef.current) { 
           videoRef.current.srcObject = stream; 
           videoRef.current.play().catch(e => console.warn("Video play error:", e)); 
@@ -225,6 +289,7 @@ export default function VictimUI() {
           }
           
           if (currentDB > audioThreshRef.current && !isFalseAlarmRef.current && !isTrappedRef.current && sensorsActiveRef.current && !isAutoDeployPaused && !showPauseModal) {
+              setTriggerReason("LOUD_SOUND");
               triggerFalseAlarm();
           }
           requestAnimationFrame(updateAudio);
@@ -245,14 +310,12 @@ export default function VictimUI() {
           };
       }
 
-      // 4. Activate Listeners
       if (motionGranted) {
           window.addEventListener('devicemotion', handleMotion);
       }
       sensorsActiveRef.current = true;
       setSensorsActive(true);
 
-      // 5. Trigger Visual Fade
       setIsFading(true);
       setTimeout(() => {
           setIsInitialized(true);
@@ -264,7 +327,6 @@ export default function VictimUI() {
       alert("Permission denied or Hardware unavailable.");
     }
   };
-  // -------------------------------------------------------------------------
 
   const triggerFalseAlarm = () => {
     if (isFalseAlarmRef.current || isTrappedRef.current || !sensorsActiveRef.current) return;
@@ -285,25 +347,27 @@ export default function VictimUI() {
   const cancelFalseAlarm = () => {
     isFalseAlarmRef.current = false;
     setFalseAlarmTimer(null);
+    setTriggerReason(null);
     if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop();
     try { recognitionRef.current?.stop(); } catch(e) {}
   };
 
-  const getProcessedAudio = async () => {
+  // ---------------------------------------------------------------------------
+  // STEP 2: Get audio blob (not Base64 — we'll upload to Storage instead)
+  // ---------------------------------------------------------------------------
+  const getAudioBlob = async () => {
     return new Promise((resolve) => {
-      const safetyTimer = setTimeout(() => resolve(""), 1500);
+      const safetyTimer = setTimeout(() => resolve(null), 1500);
       if (!mediaRecorderRef.current || audioChunksRef.current.length === 0) {
         clearTimeout(safetyTimer);
-        return resolve("");
+        return resolve(null);
       }
       mediaRecorderRef.current.onstop = () => {
         clearTimeout(safetyTimer);
-        if (audioChunksRef.current.length === 0) return resolve("");
+        if (audioChunksRef.current.length === 0) return resolve(null);
         const mimeType = mediaRecorderRef.current.mimeType || 'audio/webm';
         const blob = new Blob(audioChunksRef.current, { type: mimeType });
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result);
-        reader.readAsDataURL(blob);
+        resolve(blob);
       };
       if (mediaRecorderRef.current.state === "recording") {
         mediaRecorderRef.current.stop();
@@ -313,12 +377,16 @@ export default function VictimUI() {
     });
   };
 
-  const handleTrapped = async (isAutoTrigger = false) => {
+  const handleTrapped = async (finalStatus = "TRAPPED") => {
     if (isTrappedRef.current) return;
+    if (!deviceId) {
+      console.error("Cannot file incident: Auth UID not available yet.");
+      return;
+    }
     try { recognitionRef.current?.stop(); } catch(e) {}
 
     const isLowBandwidth = networkType === '2g' || networkType === 'slow-2g' || !isOnline;
-    let photoData = "";
+    let photoBlob = null;
     
     if (!isLowBandwidth && videoRef.current && videoRef.current.srcObject) {
       try {
@@ -335,11 +403,9 @@ export default function VictimUI() {
         
         const ctx = canvas.getContext('2d');
         ctx.drawImage(video, 0, 0, vW, vH);
-        const base64Str = canvas.toDataURL('image/jpeg', 0.3); 
-        
-        if (base64Str.length > 500 && !base64Str.endsWith("data:,")) {
-            photoData = base64Str;
-        }
+
+        // Convert to blob for Storage upload instead of base64 inline
+        photoBlob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.3));
       } catch (err) {
         console.warn("Canvas drawing failed:", err);
       }
@@ -347,14 +413,19 @@ export default function VictimUI() {
 
     isTrappedRef.current = true;
     isFalseAlarmRef.current = false;
+    
+    // Set Logical Incident State
+    setIncidentStatus(finalStatus);
     setIsBlackout(true);
     setFalseAlarmTimer(null);
 
+    // Fire the Siren
     try {
-        if (!audioCtxRef.current) {
+        if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
             audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
         }
-        setInterval(() => {
+        sirenIntervalRef.current = setInterval(() => {
+            if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
             const osc = audioCtxRef.current.createOscillator();
             osc.frequency.setValueAtTime(3000, audioCtxRef.current.currentTime);
             osc.connect(audioCtxRef.current.destination);
@@ -362,29 +433,103 @@ export default function VictimUI() {
         }, 2000);
     } catch(e) {}
 
-    const finalAudioBase64 = isLowBandwidth ? "" : await getProcessedAudio();
+    const audioBlob = isLowBandwidth ? null : await getAudioBlob();
 
-    const payload = { 
-        victimName: deviceId,
-        status: "TRAPPED", 
-        lat: locationRef.current.lat, 
-        lng: locationRef.current.lng,
-        battery: batteryLvl,
-        packetType: isLowBandwidth ? "LOW_BANDWIDTH" : "HIGH_BANDWIDTH",
-        timestamp: Date.now(),
-        aiTriage: "Pending...",
-        transcript: transcriptRef.current || "No words captured.",
-        audioDB: (Math.max(peakAudioRef.current, audioDB)).toFixed(1),
-        motionMS2: (Math.max(peakMotionRef.current, motionMS2)).toFixed(2),
-        photoBase64: photoData || "", 
-        audioRecordBase64: finalAudioBase64 || ""
+    // ---------------------------------------------------------------------------
+    // Upload media to Supabase Storage and get public URLs
+    // ---------------------------------------------------------------------------
+    let photoUrl = "";
+    let audioUrl = "";
+
+    if (!isLowBandwidth) {
+      try {
+        if (photoBlob) {
+          const photoPath = `${deviceId}/photo.jpg`;
+          const { error: photoErr } = await supabase.storage
+            .from('incident-media')
+            .upload(photoPath, photoBlob, { upsert: true, contentType: 'image/jpeg' });
+          if (!photoErr) {
+            const { data } = supabase.storage.from('incident-media').getPublicUrl(photoPath);
+            photoUrl = data?.publicUrl || "";
+          }
+        }
+        if (audioBlob) {
+          const audioPath = `${deviceId}/audio.webm`;
+          const { error: audioErr } = await supabase.storage
+            .from('incident-media')
+            .upload(audioPath, audioBlob, { upsert: true, contentType: audioBlob.type || 'audio/webm' });
+          if (!audioErr) {
+            const { data } = supabase.storage.from('incident-media').getPublicUrl(audioPath);
+            audioUrl = data?.publicUrl || "";
+          }
+        }
+      } catch (err) {
+        console.warn("Storage upload failed, continuing without media:", err);
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // STEP 2: Split write — public telemetry vs. private media/AI data
+    // ---------------------------------------------------------------------------
+    const publicPayload = {
+      id: deviceId,
+      victimName: deviceId,
+      status: finalStatus,
+      triggerReason: triggerReason || "MANUAL",
+      lat: locationRef.current.lat,
+      lng: locationRef.current.lng,
+      battery: batteryLvl,
+      packetType: isLowBandwidth ? "LOW_BANDWIDTH" : "HIGH_BANDWIDTH",
+      timestamp: Date.now(),
+      audioDB: (Math.max(peakAudioRef.current, audioDB)).toFixed(1),
+      motionMS2: (Math.max(peakMotionRef.current, motionMS2)).toFixed(2),
+    };
+
+    const privatePayload = {
+      id: deviceId,
+      photoUrl: photoUrl || "",
+      audioUrl: audioUrl || "",
+      transcript: transcriptRef.current || "No words captured.",
+      aiTriage: "Pending...",
+      priorityLevel: null,
     };
 
     try {
-        await setDoc(doc(db, "victims", deviceId), payload, { merge: true });
+      await supabase.from('incidents_public').upsert(publicPayload, { onConflict: 'id' });
+      await supabase.from('incidents_private').upsert(privatePayload, { onConflict: 'id' });
     } catch (error) {
-        console.error("Firebase Upload Failed:", error);
+      console.error("Supabase Upload Failed:", error);
     }
+  };
+
+  const handleCancelSOS = async () => {
+    if (sirenIntervalRef.current) clearInterval(sirenIntervalRef.current);
+    setIncidentStatus("CANCELLED");
+    setIsBlackout(false);
+    stopSensors();
+    
+    try {
+      if (deviceId) {
+        await supabase.from('incidents_public').update({ status: "CANCELLED_BY_USER", timestamp: Date.now() }).eq('id', deviceId);
+      }
+    } catch (e) {}
+    
+    // Purge states completely by reloading the UI
+    window.location.reload();
+  };
+
+  const handleMarkSafe = async () => {
+    stopSensors();
+    if (sirenIntervalRef.current) clearInterval(sirenIntervalRef.current);
+    setIncidentStatus("SAFE");
+    
+    try {
+      if (deviceId) {
+        await supabase.from('incidents_public').update({ status: "SAFE", timestamp: Date.now() }).eq('id', deviceId);
+      }
+    } catch(e) {}
+    
+    navigate('/safe');
   };
 
   const renderGraph = (data, strokeColor) => {
@@ -470,7 +615,7 @@ export default function VictimUI() {
       ) 
       
       /* Screen 2: BLACKOUT / SOS */
-      : isBlackout ? (
+      : isBlackout && incidentStatus !== "RESCUED" ? (
         <div className="min-h-screen bg-[#FAFAFA] flex flex-col justify-center items-center p-4 sm:p-6 antialiased" style={{ fontFamily: "'Inter', sans-serif" }}>
             <div className="bg-white p-8 sm:p-10 rounded-[24px] shadow-[0_2px_8px_rgba(220,38,38,0.1),0_16px_32px_rgba(220,38,38,0.1)] flex flex-col items-center w-full max-w-sm border border-red-100 relative overflow-hidden">
                 <div className="absolute top-0 left-0 w-full h-1 bg-red-600 animate-pulse"></div>
@@ -478,14 +623,37 @@ export default function VictimUI() {
                     <ShieldAlert size={32} className="text-red-600" />
                 </div>
                 <h1 className="text-[#171717] text-2xl font-semibold tracking-tight mb-3 text-center">Beacon Active</h1>
-                <p className="text-[#737373] text-sm text-center leading-relaxed">
-                    Command Centre has been notified.<br/>Broadcasting encrypted telemetry.
+                <p className="text-[#737373] text-sm text-center leading-relaxed mb-8">
+                    Status: {incidentStatus.replace('_', ' ')}<br/>Broadcasting encrypted telemetry.
                 </p>
+                
+                <button 
+                    onDoubleClick={handleCancelSOS} 
+                    className="text-red-600 border border-red-200 bg-red-50 py-3.5 px-8 rounded-full text-sm font-bold shadow-sm w-full transition-all hover:bg-red-100"
+                >
+                  Double Tap to Cancel
+                </button>
             </div>
         </div>
       ) 
       
-      /* Screen 3: FALSE ALARM (15s) */
+      /* Screen 3: RESCUE CONFIRMED */
+      : incidentStatus === "RESCUED" ? (
+        <div className="min-h-screen bg-[#FAFAFA] flex flex-col justify-center items-center p-4 sm:p-6 antialiased" style={{ fontFamily: "'Inter', sans-serif" }}>
+            <div className="bg-white p-8 sm:p-10 rounded-[24px] shadow-[0_2px_8px_rgba(16,185,129,0.1),0_16px_32px_rgba(16,185,129,0.1)] flex flex-col items-center w-full max-w-sm border border-emerald-100 relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-full h-1 bg-emerald-500"></div>
+                <div className="w-16 h-16 bg-emerald-50 rounded-full flex items-center justify-center mb-6">
+                    <CheckCircle size={32} className="text-emerald-600" />
+                </div>
+                <h1 className="text-[#171717] text-2xl font-semibold tracking-tight mb-3 text-center">Rescue Confirmed</h1>
+                <p className="text-[#737373] text-sm text-center leading-relaxed">
+                    Your status has been cleared by Alpha Unit.<br/>Help has arrived.
+                </p>
+            </div>
+        </div>
+      )
+
+      /* Screen 4: FALSE ALARM (15s) */
       : falseAlarmTimer !== null ? (
         <div className="min-h-screen bg-[#FAFAFA] flex flex-col justify-center items-center p-4 sm:p-6 z-50 fixed inset-0 antialiased" style={{ fontFamily: "'Inter', sans-serif" }}>
             <div className="bg-white rounded-[24px] p-8 shadow-[0_2px_8px_rgba(220,38,38,0.1),0_16px_32px_rgba(220,38,38,0.1)] w-full max-w-sm border border-red-100 flex flex-col items-center text-center">
@@ -509,7 +677,7 @@ export default function VictimUI() {
         </div>
       ) 
       
-      /* Screen 4: MAIN DASHBOARD */
+      /* Screen 5: MAIN DASHBOARD */
       : (
         <div className={`min-h-screen bg-[#FAFAFA] p-4 sm:p-6 flex flex-col transition-opacity duration-700 ${isFading ? 'opacity-0' : 'opacity-100'} relative antialiased`} style={{ fontFamily: "'Inter', sans-serif" }}>
           <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');`}</style>
@@ -582,7 +750,7 @@ export default function VictimUI() {
 
                 <div className="w-full flex gap-2 sm:gap-3">
                     <button 
-                        onClick={() => navigate('/safe')} 
+                        onClick={handleMarkSafe} 
                         className="flex-1 bg-[#F5F5F5] hover:bg-[#E5E5E5] text-[#171717] py-3 sm:py-3.5 rounded-2xl flex justify-center items-center gap-2 font-medium text-sm sm:text-[15px] transition-colors"
                     >
                         <CheckCircle size={16} strokeWidth={2}/> Mark Safe
@@ -661,7 +829,7 @@ export default function VictimUI() {
           
           <div className="mt-6 sm:mt-8 flex justify-center pb-2">
             <button 
-                onClick={() => handleTrapped(false)} 
+                onClick={() => { setTriggerReason("MANUAL"); handleTrapped("TRAPPED"); }} 
                 className="w-full bg-[#171717] text-white py-3.5 sm:py-4 rounded-full flex items-center justify-center gap-2 shadow-[0_4px_12px_rgba(0,0,0,0.1)] hover:bg-black transition-all"
             >
               <ShieldAlert size={16} className="sm:w-[18px] sm:h-[18px]"/>
